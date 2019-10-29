@@ -1,0 +1,401 @@
+---
+title: "The Pig protein Atlas"
+Subtitle: "Normalization & classification"
+author: "Max Jonatan Karlsson"
+date: ""
+output:
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r start_up, warning=F, message=F, include = F, }
+require(tidyverse)
+require(magrittr)
+require(pcaMethods)
+require(pheatmap)
+require(dendextend)
+require(ggdendro)
+require(umap)
+require(ggforce)
+require(Hmisc)
+require(NOISeq)
+require(ggrepel)
+require(gridExtra)
+require(ape)
+require(pbapply)
+
+setwd("~/Scilifelab/Projects/Pig Atlas/scripts/Normalization & classification/")
+source("../theme.R")
+source("../functions_normalization.R")
+source("../functions_classification.R")
+source("../functions_graphics.R")
+source("../functions_utility.R")
+```
+
+
+```{r read_data, include = F}
+
+# Load gene mapping tables
+gene_mapping <- read_delim("../../data/meta/ensembl_pig_gene.tab", delim = "\t")
+gene_chromosome <- read_delim("../../data/meta/ensembl92_gene_chromosome.txt", delim = "\t")
+
+# Mapping to human genes
+hpa_gene_class <- 
+  read_delim("../../data/meta/human/proteinatlas.tsv", delim = "\t") %>% 
+  select(Gene, ensg_id = Ensembl, 
+         distribution = `RNA tissue distribution`,
+         specificity = `RNA tissue specificity`)
+gene_orthologs <- read_delim("../../data/meta/ensembl_pig_ortholog.tab", delim = "\t")
+
+
+# Load sample mapping data
+tissue_mapping <- read_delim("../../data/meta/tissue_mapping.tsv", delim = "\t")
+tissue_colors <- read_delim("../../data/meta/pig_tissue_colors.tsv", delim = "\t")
+
+tissue_colors_palette <- setNames(tissue_colors$tissue_color, tissue_colors$tissue_name)
+tissue_abbrev_colors_palette <- setNames(tissue_colors$tissue_color, tissue_colors$tissue)
+sample_meta <- 
+  tibble(individual = letters[1:4],
+         sex = c("female", "female", "male", "male"))
+
+tissue_colors_palette_full <- 
+  tissue_colors %$%
+  tibble(color = c(tissue_color, region_tissue_color, consensus_tissue_color, organ_color),
+         tissue = c(tissue_name, region_tissue_name, consensus_tissue_name, organ_name)) %>%
+  unique() %$%
+  setNames(color, tissue) 
+
+tissue_colors_palette_organs <- 
+  tissue_colors %$%
+  tibble(color = c(organ_color),
+         tissue = c(organ_name)) %>%
+  unique() %$%
+  setNames(color, tissue) 
+
+
+  
+# Load data
+pig_atlas_sample_temp <- 
+  read_delim("../../data/processed/pig_filtered_sample_data.tab", delim = "\t")
+
+
+
+
+```
+
+#Normalization
+
+```{r PTPM_normalization, include = F}
+
+pig_atlas_sample <- 
+  pig_atlas_sample_temp %>% 
+  group_by(sample_ID) %>% 
+  group_by(sample_ID) %>% 
+  mutate(sum_tpm = sum(tpm), 
+         ptpm = tpm * 1e6 / sum_tpm) %>% 
+  select(-sum_tpm) %>% 
+  ungroup()
+  
+
+
+```
+
+
+```{r normalization, include = F}
+
+# Create wide format sample data
+pig_atlas_sample_wide_ptpm <- 
+  pig_atlas_sample %>%
+  select(1, 2, ptpm) %>%
+  spread(key = sample_ID, value = ptpm) %>%
+  column_to_rownames("enssscg_id")
+
+# TMM normalize sample data
+pig_atlas_sample_wide_tmm <- 
+  pig_atlas_sample_wide_ptpm %>%
+  tmm_norm_median_ref()
+  
+# Create long format normalized sample data
+pig_atlas_sample_norm <- 
+  pig_atlas_sample %>% 
+  left_join(pig_atlas_sample_wide_tmm %>% 
+              as_tibble(rownames = "enssscg_id") %>%
+              gather("sample_ID", "tmm", -1),
+            by = c("enssscg_id", "sample_ID"))  %>%
+  group_by(enssscg_id) %>%
+  mutate(nx = case_when(tpm == 0 ~ 0, 
+                        T ~ tmm/sqrt(sd(tmm)))) %>% 
+  ungroup()
+
+# Create wide format nx sample data
+pig_atlas_sample_wide_nx <- 
+  pig_atlas_sample_norm %>%
+  select(1, 2, nx) %>%
+  spread(key = sample_ID, value = nx) %>%
+  column_to_rownames("enssscg_id")
+
+
+
+```
+
+
+```{r normalization_parameter_test, include = F}
+
+norm_settings_grid <- 
+  expand.grid(logratioTrim = seq(0.2, 0.3, length.out = 5), # default = 0.3 
+              sumTrim = seq(0.04, 0.06, length.out = 5) # default = 0.05
+              ) %>%
+  mutate(i = row_number())
+
+norm_parameter_test_result <- 
+  pblapply(norm_settings_grid$i, 
+         FUN = function(i) {
+           pig_atlas_sample_wide_ptpm %>%
+           
+           tmm_norm_median_ref(logratioTrim = norm_settings_grid$logratioTrim[i],
+                               sumTrim = norm_settings_grid$sumTrim[i])
+         })
+
+# 
+# A <- 
+#   norm_parameter_test_result %>% 
+#   set_names(norm_settings_grid$i) %>%
+#   plyr::ldply(.id = "i") %>% 
+#   left_join(norm_settings_grid,
+#             by = "i")
+
+norm_parameter_test_result
+
+```
+
+
+```{r create_data_tables, include = F}
+
+# Aggregate to tissue data
+pig_atlas_tissue <- 
+  pig_atlas_sample_norm %>% 
+  group_by(enssscg_id, tissue_ID) %>% 
+  summarise(tpm = mean(tpm), 
+            ptpm = mean(ptpm), 
+            tmm = mean(tmm), 
+            nx = mean(nx)) %>% 
+  ungroup()
+  
+pig_atlas_tissue_wide_tmm <- 
+  pig_atlas_tissue %>%
+  select(1, 2, tmm) %>%
+  spread(key = tissue_ID, value = tmm) %>%
+  column_to_rownames("enssscg_id")
+
+pig_atlas_tissue_wide_nx <- 
+  pig_atlas_tissue %>%
+  select(1, 2, nx) %>%
+  spread(key = tissue_ID, value = nx) %>%
+  column_to_rownames("enssscg_id")
+
+pig_atlas_tissue_name_wide_nx <- 
+  pig_atlas_tissue_wide_nx %>% 
+  set_colnames(with(tissue_mapping, tissue_name[match(colnames(.), tissue)]))
+
+# Aggregate to consensus tissue data
+pig_atlas_consensus <- 
+  pig_atlas_tissue %>% 
+  left_join(tissue_mapping %>% 
+              select(tissue, consensus_tissue_name), 
+            by = c("tissue_ID" = "tissue")) %>%
+  group_by(enssscg_id, consensus_tissue_name) %>% 
+  summarise(tpm = max(tpm), 
+            ptpm = max(ptpm), 
+            tmm = max(tmm),
+            nx = max(nx)) %>% 
+  ungroup()
+  
+pig_atlas_consensus_wide_tmm <- 
+  pig_atlas_consensus %>%
+  select(1, 2, tmm) %>%
+  spread(key = consensus_tissue_name, value = tmm) %>%
+  column_to_rownames("enssscg_id")
+
+pig_atlas_consensus_wide_nx <- 
+  pig_atlas_consensus %>%
+  select(1, 2, nx) %>%
+  spread(key = consensus_tissue_name, value = nx) %>%
+  column_to_rownames("enssscg_id")
+
+```
+
+
+
+```{r classification}
+
+
+
+pig_gene_class <- 
+  hpa_gene_classification(data = pig_atlas_consensus,
+                          expression_col = "nx",
+                          tissue_col = "consensus_tissue_name",
+                          gene_col = "enssscg_id",
+                          enr_fold = 4,
+                          max_group_n = 5,
+                          det_lim = 1)
+
+```
+
+```{r classification_plots, include = F}
+
+# n_genes barplot & pie
+spec_dist_barplots <- class_spec_dist_barplot(pig_gene_class)
+spec_dist_barplots
+
+ggsave(savepath("class n_genes per dist barplot.pdf"), spec_dist_barplots[[1]], width = 5, height = 4)
+ggsave(savepath("class n_genes per spec barplot.pdf"), spec_dist_barplots[[2]], width = 5, height = 4)
+
+spec_dist_piecharts <- class_spec_dist_piechart(pig_gene_class)
+spec_dist_piecharts
+
+ggsave(savepath("class n_genes spec piechart.pdf"), spec_dist_piecharts[[1]], width = 6, height = 6)
+ggsave(savepath("class n_genes dist piechart.pdf"), spec_dist_piecharts[[2]], width = 6, height = 6)
+
+
+# n_genes chord
+pdf(savepath("class comb n_genes chord.pdf"), width = 6, height = 6, useDingbats = F)
+class_chord_plot(pig_gene_class)
+dev.off()
+class_chord_plot(pig_gene_class)
+
+# n_genes tissue
+n_genes_tissue_spec_plot <- 
+  class_tissue_n_enriched_barplot(pig_gene_class) 
+ggsave(savepath("class n_genes enriched per tissue barplot.pdf"), n_genes_tissue_spec_plot, width = 5, height = 6)
+
+n_genes_tissue_dist_plot <-
+  class_tissue_n_expressed_barplot(pig_gene_class)
+ggsave(savepath("class n_genes detected per tissue barplot.pdf"), n_genes_tissue_dist_plot, width = 5, height = 6)
+
+
+
+
+
+pig_gene_class %>% 
+  select(gene, spec_category, enriched_tissues, n_enriched) %>%
+  filter(!is.na(enriched_tissues)) %>%
+  mutate(enrichment_group = enriched_tissues) %>% 
+  separate_rows(enriched_tissues, sep = ", ") %>% 
+  group_by(spec_category, enriched_tissues, enrichment_group, n_enriched) %>% 
+  summarise(n_genes = n()) %>% 
+  arrange(-n_genes) %>%
+  # filter(n_genes > 5) %>% 
+  ggplot(aes(n_enriched, n_genes)) + 
+  geom_point() + 
+  geom_violin() + 
+  scale_y_log10()
+
+```
+
+```{r clustering_plots, include = F}
+
+
+
+
+
+
+
+consensus_nx_pca <- 
+  pig_atlas_consensus_wide_nx %>% 
+  {log10(. + 1)} %>%
+  t() %>%
+  pca_calc(npcs = 50)
+
+pca_score_plot(consensus_nx_pca$scores, 
+               group_mapping = tissue_mapping, 
+               group_col = "consensus_tissue_name", 
+               mapping_col = "consensus_tissue_name", 
+               pal = tissue_colors_palette_full)
+
+
+
+tissue_nx_pca <- 
+  pig_atlas_tissue_name_wide_nx %>% 
+  {log10(. + 1)} %>%
+  t() %>%
+  pca_calc(npcs = 50)
+
+pca_score_plot(tissue_nx_pca$scores, 
+               group_mapping = tissue_mapping, 
+               group_col = "consensus_tissue_name", 
+               mapping_col = "tissue_name", 
+               pal = tissue_colors_palette_full)
+
+pca_score_plot(tissue_nx_pca$scores, 
+               group_mapping = tissue_mapping, 
+               group_col = "consensus_tissue_name", 
+               mapping_col = "tissue_name", 
+               pal = tissue_colors_palette_full, 
+               xpc = 2, ypc = 3)
+
+# tissue
+
+tissue_wardclust <- 
+  tissue_nx_pca$scores[, 1:tissue_nx_pca$pc_95] %>% 
+  dist() %>% 
+  hclust(method = "ward.D2")
+
+circular_dendrogram_retinastyle(clust = tissue_wardclust, 
+                                color_mapping = tissue_colors, 
+                                label_col = "tissue_name", 
+                                color_col = "tissue_color", 
+                                mean_color = F)
+ggsave(savepath("retinagram PC tissue wardclust tissue color.pdf"), width = 10, height = 10)
+
+circular_dendrogram_retinastyle(clust = tissue_wardclust, 
+                                color_mapping = tissue_colors, 
+                                label_col = "tissue_name", 
+                                color_col = "consensus_tissue_color", 
+                                mean_color = F)
+ggsave(savepath("retinagram PC tissue wardclust consensus color.pdf"), width = 10, height = 10)
+                                   
+
+# consensus
+
+consensus_wardclust <- 
+  consensus_nx_pca$scores[, 1:consensus_nx_pca$pc_95] %>% 
+  dist() %>% 
+  hclust(method = "ward.D2")
+
+
+circular_dendrogram_retinastyle(clust = consensus_wardclust, 
+                                color_mapping = tissue_colors, 
+                                label_col = "consensus_tissue_name", 
+                                color_col = "consensus_tissue_color", 
+                                mean_color = F)
+ggsave(savepath("retinagram PC tissue wardclust consensus color.pdf"), width = 10, height = 10)
+
+#
+
+evolutionary_tree_plot(tissue_nx_pca$scores[, 1:tissue_nx_pca$pc_95],
+                       dist_fun = dist,
+                       tree_fun = nj, 
+                       color_mapping = tissue_colors, 
+                       mapping_col = "tissue", 
+                       color_col = "tissue_color")
+
+```
+
+```{r human_pig_gene_correlation, include=F}
+unique(gene_orthologs$ortholog_type)
+
+gene_orthologs %>% 
+  group_by(enssscg_id, ortholog_type) %>%
+  summarise(n = n()) %>% 
+  arrange(-n)
+gene_orthologs %>% 
+  group_by(enssscg_id, ortholog_type) %>%
+  summarise(n = n()) %>% 
+  arrange(-n)
+
+gene_orthologs
+
+
+```
+

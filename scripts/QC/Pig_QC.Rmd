@@ -1,0 +1,4213 @@
+---
+title: "QC of pig data"
+author: "Max Jonatan Karlsson"
+date: "21 October 2019"
+output:
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r start_up, warning=F, message=F, include = F, }
+require(tidyverse)
+require(magrittr)
+require(pcaMethods)
+require(pheatmap)
+require(dendextend)
+require(ggdendro)
+require(umap)
+require(ggforce)
+require(Hmisc)
+require(NOISeq)
+require(ggrepel)
+require(gridExtra)
+
+setwd("~/Scilifelab/Projects/Pig Atlas/scripts/QC")
+simple_theme <- theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+heatmap_palette = viridis::inferno(20, direction = -1)
+```
+
+
+```{r read_data, include = F}
+
+# Load gene mapping tables
+transcript_mapping <- read_delim("../../data/meta/ensembl_pig_transcript.tab", delim = "\t")
+gene_mapping <- read_delim("../../data/meta/ensembl_pig_gene.tab", delim = "\t")
+gene_chromosome <- read_delim("../../data/meta/ensembl92_gene_chromosome.txt", delim = "\t")
+XY_genes <- gene_chromosome %>% 
+  select(enssscg_id = 1, gene_name = `Gene name`, chromosome = 4) %>% 
+  distinct() %>%
+  filter(chromosome %in% c("X", "Y"))
+
+gene_chromosome_human <- read_delim("../../data/meta/human/ensembl92_gene_chromosome.tsv", delim = "\t")
+
+protein_atlas <- 
+  read_delim("../../data/meta/human/proteinatlas.tsv", delim = "\t") %>% 
+  select(Gene, ensg_id = Ensembl, 
+         distribution = `RNA tissue distribution`,
+         specificity = `RNA tissue specificity`)
+gene_orthologs <- read_delim("../../data/meta/ensembl_pig_ortholog.tab", delim = "\t")
+
+# Human data
+human_data <- read_delim("../../data/human data/lims/consensus_max_of_all_groups_92.tsv", delim = "\t")
+human_sample_data <- 
+  read_delim("../../data/human data/lims/hpa_tissue_samples_TPM_e92.txt", delim = "\t", 
+             col_names = c("ensg_id", "tissue_name", "sample_ID", "tpm", "source"))
+
+# Load data
+raw_data <- read_delim("../../data/raw/Compiled_raw_tpm_pigtissue.tsv", delim = "\t")
+brain_data <- read_delim("../../data/raw/rna_pigbrain_pig_sample_92.tsv", delim = "\t")
+
+
+# Sequencing QC data
+seq_QC_data <- 
+  read_delim("../../data/meta/Sequencing QC data/QC-tissue.tsv", delim = "\t") %>%
+  rename(M_reads = 2, 
+         G_bases = 3, 
+         perc_reads_Q20 = 4,
+         perc_reads_Q30 = 5) %>%
+  separate(Sample, into = c("individual_n", "tissue_ID"), sep = "-") %>% 
+  mutate(individual = letters[as.integer(individual_n)],
+         sample_ID = paste(tissue_ID, individual, sep = "_")) %>%
+  select(sample_ID, tissue_ID, individual, everything()) %>%
+  select(-individual_n)
+  
+fastQ_filesize <- 
+  read_csv("../../data/meta/Sequencing QC data/FastQ_filesize.csv")
+
+
+tissue_mapping <- read_delim("../../data/meta/tissue_mapping.tsv", delim = "\t")
+tissue_colors <- read_delim("../../data/meta/pig_tissue_colors.tsv", delim = "\t")
+tissue_colors_palette <- setNames(tissue_colors$tissue_color, tissue_colors$tissue_name)
+tissue_abbrev_colors_palette <- setNames(tissue_colors$tissue_color, tissue_colors$tissue)
+sample_meta <- 
+  tibble(individual = letters[1:4],
+         sex = c("female", "female", "male", "male"))
+
+tissue_colors_palette_full <- 
+  tissue_colors %$%
+  tibble(color = c(tissue_color, region_tissue_color, consensus_tissue_color, organ_color),
+         tissue = c(tissue_name, region_tissue_name, consensus_tissue_name, organ_name)) %>%
+  unique() %$%
+  setNames(color, tissue) 
+
+tissue_colors_palette_organs <- 
+  tissue_colors %$%
+  tibble(color = c(organ_color),
+         tissue = c(organ_name)) %>%
+  unique() %$%
+  setNames(color, tissue) 
+
+unique_tissues <- 
+  raw_data %>%
+  select(tissue, tissue_ID) %>%
+  unique()
+
+pig_data_transcripts <- 
+  raw_data %>%
+  select(ensssct_id = 1, 
+         tpm, 
+         individual = individual_1,
+         tissue_ID) %>%
+  left_join(tissue_mapping, 
+            by = c("tissue_ID" = "tissue")) %>% 
+  mutate(ensssct_id = gsub("\\.\\d$", "", ensssct_id)) %>%
+  left_join(transcript_mapping, 
+            by = "ensssct_id") %>% 
+  # Remove genes that are not in the mapping db:
+  filter(!is.na(enssscg_id))
+
+pig_data <- 
+  pig_data_transcripts %>% 
+  group_by(enssscg_id, 
+           individual,
+           tissue_ID,
+           tissue_name,
+           region_tissue_name,
+           consensus_tissue_name,
+           organ_name) %>%
+  summarise(tpm = sum(tpm)) %>% 
+  ungroup() %>%
+  # Add brain data
+  bind_rows(brain_data %>%
+              mutate(individual = letters[as.numeric(str_extract(sample, "^\\d"))],
+                     tissue_ID = gsub("^\\d-", "", sample)) %>% 
+              left_join(tissue_mapping, 
+                        by = c("tissue_ID" = "tissue")) %>% 
+              select(enssscg_id,
+                     individual,
+                     tissue_ID, 
+                     tissue_name, 
+                     region_tissue_name,
+                     consensus_tissue_name,
+                     organ_name,
+                     tpm)) %>% 
+  
+  # Remove extra olfactory sample
+  filter(tissue_ID != "OB-3X")
+  
+
+
+
+wide_tpm_pig_data <- 
+  pig_data %>%
+  select(1, 2, 3, tpm) %>%
+  unite(col = "sample_ID", tissue_ID, individual, sep = "_") %>%
+  spread(key = sample_ID, value = tpm) %>%
+  column_to_rownames("enssscg_id")
+
+
+tissues_in_data <- 
+  unique(pig_data$tissue_ID)
+
+#Tissues not in data:
+tissue_mapping$tissue[!tissue_mapping$tissue %in% tissues_in_data]
+
+tissues_in_data[!tissues_in_data %in% tissue_mapping$tissue]
+
+# brain_data %>%
+#   select(2:3) %>%
+#   unique() %>% 
+#   filter(grepl("pineal-gland|OB-3X", sample))
+
+length(unique(pig_data$tissue_ID))
+dim(wide_tpm_pig_data)[2]
+
+```
+
+```{r test_ol_bulb, eval = F, include = F}
+
+ob_data <- 
+  pig_data %>% 
+  filter(tissue_ID %in% c("ob", "OB-3X")) %>%
+  select(individual, tissue_ID, tpm, enssscg_id) %>%
+  unite(tissue_ID, individual, col = "sample_ID", sep = "_", remove = T) %>%
+  spread(sample_ID, tpm) %>%
+  column_to_rownames("enssscg_id") 
+
+ob_data %>%
+  cor(method = "spearman") %>%
+  pheatmap()
+  
+
+ob_pca <- 
+  ob_data %>%
+  t() %>%
+  pca(nPcs = 5)
+
+
+scores(ob_pca) %>% 
+  as_tibble(rownames = "sample_ID") %>%
+  ggplot(aes(PC1, PC2, label = sample_ID)) + 
+  geom_point() + 
+  geom_label() + 
+  simple_theme
+
+scores(ob_pca) %>% 
+  scale() %>%
+  pheatmap()
+
+
+
+```
+
+
+```{r gene_metrics, echo = F, warning = F, message = F, include=F}
+gene_pearson_data <- 
+  wide_tpm_pig_data %>%
+  t()
+
+gene_metrics <- 
+  tibble(enssscg_id = colnames(gene_pearson_data), 
+         sd = apply(gene_pearson_data, MARGIN = 2, FUN = sd),
+         mean = apply(gene_pearson_data, MARGIN = 2, FUN = mean), 
+         CV = 100 * sd / mean,
+         n_non_zero = apply(gene_pearson_data, MARGIN = 2, FUN = function(x) length(x[which(x > 0)])),
+         frac_non_zero = apply(gene_pearson_data, MARGIN = 2, FUN = function(x) length(x[which(x > 0)])/length(x)))
+  
+enssscg_not_expressed <- 
+  gene_metrics %>% 
+  filter(sd == 0) %$%
+  enssscg_id
+```
+
+
+#Tissue grouping hierarchy
+The following two plots describe the hierarchy of tissues for the Brain, and Adipose & soft tissue organs, and how they are grouped together. Similar plots for remaining organs are available in the file "Pig tissue groupings.pdf". The levels in the plot are from top to bottom as follows: Organ, Consensus tissue, Region (Only for brain), Tissue.
+
+```{r tissue_grouping, echo = F, message = F, warning = F, results = F}
+
+tb <- tissue_mapping
+lvls <- names(tissue_mapping)[c(2,3,4,6)]
+top_lvl_n <- length(lvls)
+nudge_y_n <- 7
+
+ordering_strs <- 
+  combn(LETTERS, 3) %>% 
+  apply(MARGIN = 2, FUN = function(x) paste(x, collapse = ""))
+
+
+tb_1 <- 
+  tb %>%
+  select(1,2,3,4,6,7) %>%
+  gather(key = "level_id", value = "id", 2:5) %>%
+  mutate(lvl = match(level_id, lvls),
+         y = lvl, 
+         parent = mapply(tissue, l = lvl, 
+                         FUN = function(tis, l) {
+                           out <- id[tissue == tis & lvl == l + 1]; 
+                           ifelse(length(out) == 0, NA, out)
+                         }),
+         group = sapply(tissue, 
+                        FUN = function(tis) {
+                          id[tissue == tis & lvl == top_lvl_n]
+                        }))  %>% 
+  left_join(arrange(., lvl, id) %>%
+              left_join(unique(.$id) %>% 
+                          sort() %>% 
+                          enframe("n", "id") %>% 
+                          mutate(order_str = ordering_strs[1:nrow(.)]) %>%
+                          select(-1),
+                        by = "id") %>%
+              filter(lvl != 1) %>%
+              group_by(tissue) %>%
+              summarise(order_str = paste(rev(order_str[lvl-1]), collapse = "_")),
+            by = "tissue") %>%
+  select(-1) %>%
+  arrange(lvl, group, order_str) %>% 
+  select(-order_str) %>%
+  unique() %>%
+  # arrange(order_str) %>% 
+  mutate(x = ifelse(lvl == 1, row_number(), NA), 
+         y = y + 0.1* rep((nudge_y_n:1) - mean(1:nudge_y_n), length(y))[1:length(y)]) 
+
+
+
+tb_2 <- 
+  tb_1 %>% 
+  mutate(x = ifelse(lvl > 1, 
+                    mapply(id, group, FUN = function(id_, gr_) mean(x[parent == id_ & group == gr_], na.rm = T)), 
+                    x),
+         x = ifelse(lvl > 2, 
+                    mapply(id, group, FUN = function(id_, gr_) mean(x[parent == id_ & group == gr_], na.rm = T)), 
+                    x),
+         x = ifelse(lvl > 3, 
+                    mapply(id, group, FUN = function(id_, gr_) mean(x[parent == id_ & group == gr_], na.rm = T)), 
+                    x)) 
+
+plot_data <- 
+  tb_2 %>%
+  mutate(yend = mapply(parent, l = lvl, gr = group,
+                         FUN = function(par, l, gr) {
+                           out <- y[which(id == par & lvl == l + 1 & group == gr)]; 
+                           ifelse(length(out) == 0, NA, out)
+                         }),
+         xend = mapply(parent, l = lvl, gr = group,
+                         FUN = function(par, l, gr) {
+                           out <- x[which(id == par & lvl == l + 1 & group == gr)]; 
+                           ifelse(length(out) == 0, NA, out)
+                         })) %>%
+  filter(lvl > 1 | regional_tissue)
+
+plots <- 
+  lapply(unique(plot_data$group), 
+         FUN = function(gr) {
+           plot_data_sub <- 
+             plot_data %>% 
+             filter(group == gr) 
+           
+           curve_amplitude <- 0.3
+           central_x <- filter(plot_data_sub, lvl == max(lvl))$x
+           curvatures <- 
+             scales::rescale(plot_data_sub$x - central_x, c(-1, 1)) * curve_amplitude
+             
+           
+           g1 <-
+             plot_data_sub %>%
+               ggplot(., aes(x, y, fill = id, color = id, label = id, size = sqrt(lvl)))+
+               geom_label(show.legend = F, color = "black")+
+               simple_theme+
+               theme(axis.text = element_blank(), 
+                     axis.title = element_blank(),
+                     axis.ticks = element_blank(), 
+                     panel.border = element_blank())+
+               scale_color_manual(values = tissue_colors_palette_full)+
+               scale_fill_manual(values = tissue_colors_palette_full)+
+               scale_size_continuous(range = c(4, 8))+
+               scale_alpha_continuous(range = c(0,0.35)) + 
+               scale_x_continuous(expand = c(0.2, 0.2))
+           
+           g2 <- 
+             g1 + 
+             lapply(1:nrow(plot_data_sub),
+                    function(i) {
+                      geom_curve(data = plot_data_sub[i,],
+                                 aes(xend = xend, yend = yend), 
+                                 show.legend = F, 
+                                 alpha = 0.3,
+                                 curvature = curvatures[i])
+                    })
+         
+           g2 + geom_label(show.legend = F, color = "black") 
+           })
+         
+plots[[1]]
+plots[[2]]
+
+
+pdf("Figures/Pig tissue groupings.pdf", width = 16, height = 9, useDingbats = F)
+plots
+dev.off()
+
+```
+
+\pagebreak
+
+#Normalization
+
+All samples were TMM normalized together with a median sample (median expression for all genes) as a reference distribution. Only protein coding genes are included. The plot below shows the distribution of expression values before and after TMM normalization for some selected tissues. Only transcripts with non-zero tpm have been included.
+
+```{r TMM, echo = F, warning = F, message = F, results=F}
+
+tmm_norm_median_ref <- function(x, ...) {
+  
+  median_column <- 
+    apply(x, 
+          MARGIN = 1, 
+          median)
+  
+  x[, dim(x)[2] + 1] <- median_column
+  
+  norm_data <- tmm(x, refColumn = dim(x)[2], ...)
+  
+  norm_data[, -(dim(x)[2])]
+}
+
+
+wide_tmm_pig_data <- 
+  tmm_norm_median_ref(wide_tpm_pig_data)
+
+
+
+pig_data_norm <- 
+  pig_data %>% 
+  left_join(wide_tmm_pig_data %>% 
+              as_tibble(rownames = "enssscg_id") %>%
+              gather("sample_ID", "tmm", -1) %>% 
+              separate(sample_ID, into = c("tissue_ID", "individual"), sep = "_"),
+            by = c("enssscg_id", "tissue_ID", "individual")) %>%
+  
+  select(1,2, "tpm", "tmm", everything())
+
+
+pig_data_norm %>% 
+  filter(tissue_name %in% c('heart Wall', 'juijenum', 'joint cartilage', 
+                            # 'skin with a lot of hair', 'heart valva', 'joint (adjacent tissue)', 
+                            'salivary gland', 'tonsil', 'pancreas')) %>%
+  gather("metric", "value", tpm, tmm) %>%
+  mutate(metric = factor(toupper(metric), levels = c("TPM", "TMM"))) %>%
+  ggplot(aes(metric, value, fill = tissue_name)) + 
+  geom_violin(show.legend = F, 
+              draw_quantiles = 0.5) + 
+  facet_grid(individual ~ tissue_name) + 
+  simple_theme + 
+  theme(panel.border = element_blank(),
+        panel.spacing = unit(0, "lines")) +
+  scale_y_log10(expand = c(0,0)) +
+  scale_fill_manual(values = tissue_colors_palette)
+
+```
+
+```{r TMM_plots, eval = F, echo = F, warning = F, message = F, results=F}
+
+pig_data_norm %>%
+  ggplot(aes(tpm + 1, tmm + 1)) +
+  geom_hex(bins = 100) +
+  scale_x_log10() +
+  scale_y_log10()
+
+pig_data_norm %>%
+  ggplot(aes(tpm, tmm)) +
+  geom_smooth() +
+  facet_wrap(~tissue_name, scales = "free") +
+  simple_theme +
+  theme(axis.text = element_blank(), axis.ticks =element_blank())
+
+
+pig_data_norm %>%
+  filter(tissue_name %in% c("joint cartilage", "cecum")) %>%
+  ggplot(aes(tpm + 1, tmm + 1)) +
+  geom_hex(bins = 100) +
+  geom_smooth() +
+  scale_x_log10() +
+  scale_y_log10() +
+  facet_grid(individual~tissue_name, scales = "free") +
+  simple_theme +
+  theme(axis.text = element_blank(), axis.ticks =element_blank())
+
+```
+
+#RNA and sequencing quality control
+
+```{r Seq_QC, echo = F, message=F, warning=F, results=F}
+
+# seq_QC_pca <- 
+#   seq_QC_data %>% 
+#   select(-(2:3)) %>%
+#   column_to_rownames("sample_ID") %>%
+#   as.matrix() %>% 
+#   scales::rescale(c(0,1)) %>%
+#   pca()
+#   
+# scores(seq_QC_pca) %>%
+#   as_tibble(rownames = "sample_ID") %>%
+#   separate(sample_ID, into = c("tissue_ID", "individual"), sep = "_") %>%
+#   left_join(tissue_mapping,
+#             by = c("tissue_ID" = "tissue")) %>%
+#   ggplot(aes(PC1, PC2, color = tissue_name)) + 
+#   geom_point(show.legend = F) + 
+#   scale_color_manual(values = tissue_colors_palette) +
+#   simple_theme
+
+seq_QC_data %>%
+  mutate(passed_all = M_reads >= 20 & perc_reads_Q30 >= 80) %>%
+  left_join(tissue_mapping,
+            by = c("tissue_ID" = "tissue")) %>%
+  
+  
+            {ggplot(., aes(perc_reads_Q30, M_reads, color = tissue_name)) + 
+                annotate("rect", 
+                         xmin = c(-Inf, -Inf, -Inf, -Inf), 
+                         xmax = c(80, 79, Inf, Inf), 
+                         ymin = c(-Inf, -Inf, -Inf, -Inf), 
+                         ymax = c(Inf, Inf, 20, 10), fill = "red", alpha = 0.12)+
+                geom_hline(yintercept = c(20, 10), linetype = c("dotted", "dashed"), color = "red")+
+                geom_vline(xintercept = c(80, 79), linetype = c("dotted", "dashed"), color = "red")+
+                geom_point(show.legend = F) + 
+                # geom_text_repel(data = filter(., !passed_all), 
+                #                 aes(label = sample_ID)) +
+                geom_text(data = filter(., !passed_all), 
+                                aes(label = sample_ID), 
+                          show.legend = F, 
+                          hjust = 1, 
+                          color = "black") +
+                scale_color_manual(values = tissue_colors_palette) +
+                
+                simple_theme + 
+                xlab(label = "% of reads with Q-score >= 30")+
+                ylab(label = "Million of reads") + 
+                ggtitle(label = "Million reads/Quality score")}
+  
+
+
+
+```
+
+
+```{r Mreads_vs_filesize, eval = F, echo = F, include = F}
+
+seq_QC_data %>%
+  left_join(fastQ_filesize %>% 
+              select(3:6), 
+            by = c("tissue_ID" = "tissue", "individual")) %>%
+  left_join(tissue_mapping, 
+            by =  c("tissue_ID" = "tissue")) %>%
+  ggplot(aes(size, M_reads, color = tissue_name)) + 
+  
+  geom_point(show.legend = F) + 
+  geom_line(aes(group = sample_ID), 
+            show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) +
+  scale_x_log10() + 
+  scale_y_log10() + 
+  simple_theme + 
+  xlab(label = "FastQ file size")+
+  ylab(label = "Million of reads")
+
+
+
+
+```
+
+
+##Fraction of genes with zero expression
+
+The following plots describe the number of genes with TPM = 0 in each sample. We see that many genes are missing for pancreas samples - much more than for any other sample (except one joint adjacent tissue sample that will be removed further ahead). This could be due to autodigestion of the sample by the nucleases present in the pancreas. Pancreas samples b and d lack most genes, and will thus be removed.
+
+```{r zero_exp_plots_0, echo = F, warning = F, message = F, results=F}
+
+
+plot_data <- 
+  pig_data %>%
+  group_by(tissue_ID, individual, tissue_name) %>%
+  summarise(n_expr = length(which(tpm > 0)),
+            n_not_expr = length(which(tpm <= 0)),
+            
+            fract_expr = n_expr/(n_expr + n_not_expr),
+            fract_not_expr = n_not_expr/(n_expr + n_not_expr)) 
+
+plot_data %>% 
+  gather("type", "Number of genes", n_expr, n_not_expr) %>%
+  mutate(type = case_when(type == "n_expr" ~ "TPM > 0",
+                          type == "n_not_expr" ~ "TPM = 0")) %>%
+  mutate(tissue_name = factor(tissue_name, levels = unique(tissue_mapping$tissue_name[order(tissue_mapping$organ_name)]))) %>%
+  ggplot(aes(tissue_name, `Number of genes`, fill = type)) + 
+  geom_col(show.legend = T)+
+  facet_grid(individual~.) + 
+  simple_theme + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  scale_fill_manual(values = c("red", "gray")) + 
+  ggtitle("Fractions of expressed genes") + 
+  xlab("")
+
+ggsave("Figures/Barplot n genes expressed per sample.pdf", height = 6, width = 10, useDingbats = F)
+
+plot_data %>%
+  ggplot(aes(fract_expr)) + 
+  geom_density() + 
+  geom_text_repel(data = plot_data %>%
+                    filter(tissue_name %in% c("pancreas", "testis")),
+                  aes(fract_expr, y = 0.5, label = paste(tissue_name, individual)), 
+                  inherit.aes = F, 
+                  angle = 90,
+                  vjust = 1,
+                  # hjust = 0.5,
+                  nudge_y = 10) + 
+  simple_theme + 
+  xlab("Fraction of genes TPM > 0")
+
+ggsave("Figures/Density n genes expressed per sample.pdf", height = 3, width = 6, useDingbats = F)
+
+genes_expressed_in_all_exc_pancreas <- 
+  wide_tmm_pig_data %>%
+  {.[,!grepl("^pan_", colnames(.))]} %>%
+  apply(MARGIN = 1,
+        FUN = function(x) all(x > 0)) %>%
+  {.[.]} %>%
+  names()
+
+length(genes_expressed_in_all_exc_pancreas)
+
+plot_data <- 
+  pig_data %>%
+  filter(tissue_ID == "pan") %>%
+  mutate(gene_expressed_in_all = enssscg_id %in% genes_expressed_in_all_exc_pancreas) %>%
+  group_by(tissue_ID, individual, tissue_name, gene_expressed_in_all) %>%
+  summarise(n_expr = length(which(tpm > 0)),
+            n_not_expr = length(which(tpm == 0)),
+            
+            fract_expr = n_expr/(n_expr + n_not_expr),
+            fract_not_expr = n_not_expr/(n_expr + n_not_expr)) 
+
+plot_data %>%
+  gather("type", "Number of genes", n_expr, n_not_expr) %>%
+  mutate(type = case_when(type == "n_expr" ~ "TPM > 0",
+                          type == "n_not_expr" ~ "TPM = 0")) %>%
+  filter(type == "TPM = 0") %>%
+  ggplot(aes(individual, `Number of genes`, label = `Number of genes`, fill = gene_expressed_in_all)) + 
+  geom_col() + 
+  geom_text(position = position_stack(vjust = 1), 
+            vjust = 0) + 
+  # facet_grid(.~individual) + 
+  simple_theme + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  scale_fill_manual(values = c("gray", "red")) + 
+  ggtitle("Number of genes NOT expressed in pancreas samples")
+
+ggsave("Figures/Density n genes not expressed pancreas.pdf", height = 4, width = 6, useDingbats = F)
+
+# Genes that are expressed in all tissues except pancreas, removing the ones that are expressed in all pancreas samples
+
+  wide_tpm_pig_data %>%
+  {.[genes_expressed_in_all_exc_pancreas,]} %>% 
+  {.[,grepl("^pan_", colnames(.))]} %>%
+  {.[!apply(.,
+            MARGIN = 1,
+            FUN = function(x) all(x > 0)),]} %>%
+  # {.[!apply(., 
+  #           MARGIN = 1,
+  #           FUN = function(x) all(x == 0)),]} %>%
+            {.>0} %>%
+    apply(MARGIN = 2, sum)
+  
+
+  
+```
+
+The following plots show how the number of "missing" genes in each sample is correlated with the sequencing quality metrics. We see that there is a strong correlation between number of reads and the number of genes with TPM = 0. This suggests that the issue with pancreas is simply sequencing depth.
+
+```{r zero_exp_plots_1, echo = F, warning = F, message = F, results=F}
+
+
+plot_data <- 
+  pig_data %>%
+  group_by(tissue_ID, individual, tissue_name) %>%
+  summarise(n_expr = length(which(tpm > 0)),
+            n_not_expr = length(which(tpm <= 0)),
+            
+            fract_expr = n_expr/(n_expr + n_not_expr),
+            fract_not_expr = n_not_expr/(n_expr + n_not_expr)) %>%
+  left_join(seq_QC_data,
+            by = c("tissue_ID", "individual"))
+
+
+grid.arrange(plot_data %>% 
+               {ggplot(., aes(perc_reads_Q30, n_not_expr)) + 
+                   
+                   geom_smooth(color = "gray40", 
+                               fill = "gray65", 
+                               method = "lm") + 
+                   geom_point(aes(color = tissue_name),
+                              show.legend = F)+
+                   annotate("text", x = 90, y = 10000, 
+                            label = paste("Pearson's r:", 
+                                          round(cor(log10(.$perc_reads_Q30), log10(.$n_not_expr), 
+                                                    method = "pearson",
+                                                    use = "pairwise.complete.obs"), 2))) + 
+                   simple_theme + 
+                   scale_color_manual(values = tissue_colors_palette) +
+                   xlab("% of reads >Q30")+
+                   ylab("Number of genes TPM = 0") + 
+                   ggtitle('Numbers of "missing" genes by % of reads >Q30') + 
+                   scale_x_log10() + 
+                   scale_y_log10()},
+             plot_data %>%
+               ggplot(aes(n_not_expr)) + 
+               geom_density(color = NA, 
+                            fill = "red", 
+                            alpha = 0.5) + 
+               simple_theme +
+               scale_x_log10() +
+               ggtitle('') + 
+               theme(axis.text.y = element_blank(), 
+                     axis.text.x = {temp <- simple_theme$axis.text.x; temp$colour <- NA; temp}, 
+                     axis.title.y = element_blank(), 
+                     axis.title.x = {temp <- simple_theme$axis.title.x; temp$colour <- NA; temp}, 
+                     axis.ticks = element_blank(), 
+                     panel.border = element_blank()) +
+               coord_flip(), 
+             nrow = 1, 
+             widths = c(1, 0.3))
+
+grid.arrange(plot_data %>% 
+               {ggplot(., aes(M_reads, n_not_expr)) + 
+                   
+                   geom_smooth(color = "gray40", 
+                               fill = "gray65", 
+                               method = "lm") + 
+                   geom_point(aes(color = tissue_name),
+                              show.legend = F)+
+                   annotate("text", x = 100, y = 10000, 
+                            label = paste("Pearson's r:", 
+                                          round(cor(log10(.$M_reads), log10(.$n_not_expr), 
+                                                    method = "pearson",
+                                                    use = "pairwise.complete.obs"), 2))) + 
+                   simple_theme + 
+                   scale_color_manual(values = tissue_colors_palette) +
+                   xlab("Million reads") + 
+                   ylab("Number of genes TPM = 0") + 
+                   ggtitle('Numbers of "missing" genes by number of reads') + 
+                   scale_x_log10() + 
+                   scale_y_log10()},
+             plot_data %>%
+               ggplot(aes(n_not_expr)) + 
+               geom_density(color = NA, 
+                            fill = "red", 
+                            alpha = 0.5) + 
+               simple_theme +
+               scale_x_log10() +
+               ggtitle('') + 
+               theme(axis.text.y = element_blank(), 
+                     axis.text.x = {temp <- simple_theme$axis.text.x; temp$colour <- NA; temp}, 
+                     axis.title.y = element_blank(), 
+                     axis.title.x = {temp <- simple_theme$axis.title.x; temp$colour <- NA; temp}, 
+                     axis.ticks = element_blank(), 
+                     panel.border = element_blank()) +
+               coord_flip(), 
+             nrow = 1, 
+             widths = c(1, 0.3))
+  
+
+  
+```
+
+
+The following plots show the gene-wise variance between replicates by the genes' mean expression. We see pancreas and joint cartilage as outliers - again demonstrating that pancreas and joint cartilage b will need to be removed.
+
+```{r zero_exp_plots_2, echo = F, warning = F, message = F, results=F}
+
+
+gene_metrics_exporder <- 
+  gene_metrics %>%
+  arrange(mean) %>% 
+  mutate(expression_order = 1:nrow(.))
+
+intra_tissue_gene_variance <- 
+  pig_data_norm %>%
+  group_by(tissue_ID, tissue_name, enssscg_id) %>% 
+  summarise(sd = sd(tmm), 
+            mean = mean(tmm),
+            CV = 100 * sd / mean, 
+            n_0 = length(which(tmm == 0))) %>% 
+  group_by(tissue_ID) %>%
+  arrange(mean) %>% 
+  mutate(expression_order = 1:length(enssscg_id)) %>%
+  ungroup() %>%
+  left_join(gene_metrics_exporder %>% 
+              select(enssscg_id, expression_order, mean),
+            by = "enssscg_id", 
+            suffix = c("_local", "_global"))
+
+
+
+# tis_to_plot <- c("pancreas", "joint cartilage", 'heart wall', 'jejunum',
+#                             'salivary gland', 'tonsil')
+
+
+intra_tissue_gene_variance %>% 
+  # filter(tissue_name %in% tis_to_plot) %>%
+  ggplot(aes(log10(mean_local + 1), CV)) + 
+  geom_hex(aes(fill = stat(log10(count))),
+           bins = 100) + 
+  geom_smooth(aes(color = tissue_name), 
+              show.legend = F, 
+              fill = NA) +
+  geom_vline(xintercept = log10(1 + 1), color = "red") + 
+  ggtitle("Intratissue gene variance by tissue mean expression") + 
+  xlab("Mean expression in tissue") +
+  
+  scale_fill_viridis_c() +
+  scale_color_manual(values = tissue_colors_palette) +
+  simple_theme 
+
+intra_tissue_gene_variance %>% 
+  # filter(tissue_name %in% tis_to_plot) %>%
+  ggplot(aes(log10(mean_global + 1), CV)) + 
+  geom_hex(aes(fill = stat(log10(count))),
+           bins = 100) + 
+  geom_smooth(aes(color = tissue_name), 
+              show.legend = F, 
+              fill = NA) +
+  geom_vline(xintercept = log10(1 + 1), color = "red") + 
+  ggtitle("Intratissue gene variance by global mean expression") + 
+  xlab("Global mean expression") +
+  
+  scale_fill_viridis_c() +
+  scale_color_manual(values = tissue_colors_palette) +
+  simple_theme 
+
+
+
+```
+
+
+
+\pagebreak
+
+#Transcript level distribution
+
+Here we see the transcript level distribution in the four individuals (a, b, c, d) first for TPM values and then TMM values. Only transcripts with non-zero tpm have been included.
+
+```{r distribution_plots_0, echo = F, warning = F, message = F, results=F, fig.height=10, fig.width=6}
+
+pig_data %>%
+  mutate(tissue_name = factor(tissue_name, levels = unique(tissue_mapping$tissue_name[order(tissue_mapping$organ_name)]))) %>%
+  ggplot(aes(tissue_name, log10(tpm), fill = tissue_name)) + 
+  geom_violin(show.legend = F, draw_quantiles = 0.5, scale = "width") + 
+  facet_grid(individual~.) + 
+  simple_theme + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  scale_fill_manual(values = tissue_colors_palette) + 
+  ggtitle("Transcript level distribution - TPM")
+
+
+```
+
+```{r distribution_plots_02, echo = F, warning = F, message = F, results=F, fig.height=10, fig.width=6}
+
+pig_data_norm %>%
+  mutate(tissue_name = factor(tissue_name, levels = unique(tissue_mapping$tissue_name[order(tissue_mapping$organ_name)]))) %>%
+  ggplot(aes(tissue_name, log10(tmm), fill = tissue_name)) + 
+  geom_violin(show.legend = F, draw_quantiles = 0.5, scale = "width") + 
+  facet_grid(individual~.) + 
+  simple_theme + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  scale_fill_manual(values = tissue_colors_palette)+ 
+  ggtitle("Gene level distribution - TMM normalized")
+```
+
+```{r distribution_plots_pancreas, eval = F, echo = F, warning = F, message = F, results=F, fig.height=10, fig.width=6}
+pig_data_norm %>%
+  mutate(tissue_name = factor(tissue_name, levels = unique(tissue_mapping$tissue_name[order(tissue_mapping$organ_name)]))) %>%
+  filter(tissue_name %in% c('heart wall', 'jejunum',
+                            # 'skin with a lot of hair', 'heart valva', 'joint (adjacent tissue)', 
+                            'salivary gland', 'tonsil', 'pancreas')) %>%
+  ggplot(aes(tissue_name, log10(tpm), fill = tissue_name, color = individual)) + 
+  geom_violin(show.legend = F, draw_quantiles = 0.5, scale = "width") + 
+  # facet_grid(individual~.) + 
+  scale_color_manual(values = rep("black", 4)) +
+  simple_theme + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  scale_fill_manual(values = tissue_colors_palette)+ 
+  ggtitle("Gene level distribution - Not normalized")
+
+pig_data_norm %>%
+  mutate(tissue_name = factor(tissue_name, levels = unique(tissue_mapping$tissue_name[order(tissue_mapping$organ_name)]))) %>%
+  filter(tissue_name %in% c('heart wall', 'jejunum',
+                            # 'skin with a lot of hair', 'heart valva', 'joint (adjacent tissue)', 
+                            'salivary gland', 'tonsil', 'pancreas')) %>%
+  ggplot(aes(tissue_name, log10(tmm), fill = tissue_name, color = individual)) + 
+  geom_violin(show.legend = F, draw_quantiles = 0.5, scale = "width") + 
+  # facet_grid(individual~.) + 
+  scale_color_manual(values = rep("black", 4)) +
+  simple_theme + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  scale_fill_manual(values = tissue_colors_palette)+ 
+  ggtitle("Gene level distribution - TMM normalized")
+
+```
+
+
+```{r distribution_plots_1, eval = F, echo = F, warning = F, message = F, results=F}
+
+
+plots <- 
+  tissue_mapping %>%
+  arrange(organ_name, tissue_group, tissue_name) %$%
+  lapply(tissue_name,
+         FUN = function(tissue_) {
+           plot_data <-
+             pig_data %>%
+             filter(tissue_name == tissue_) 
+           
+           if(nrow(plot_data) == 0) return()
+           
+           plot_data %>%
+             ggplot(aes(individual, log10(tpm), fill = tissue_name)) + 
+             geom_violin(show.legend = F, draw_quantiles = 0.5, scale = "width") + 
+             facet_grid(~tissue_name) + 
+             simple_theme + 
+             theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+             scale_fill_manual(values = tissue_colors_palette)
+         })
+
+plots
+
+
+
+```
+
+```{r distribution_plots_2, eval = F, echo = F, warning = F, message = F, results=F}
+plots <- 
+  tissue_mapping %>%
+  arrange(organ_name, tissue_group, tissue_name) %$%
+  lapply(unique(organ_name),
+         FUN = function(organ_) {
+           plot_data <-
+             pig_data %>%
+             mutate(tissue_name = factor(tissue_name, 
+                                         levels = unique(tissue_mapping$tissue_name[order(tissue_mapping$organ_name)]))) %>%
+             filter(organ_name == organ_) 
+           
+           if(nrow(plot_data) == 0) return()
+           
+           plot_data %>%
+             ggplot(aes(tissue_name, log10(tpm), fill = tissue_name)) + 
+             geom_violin(show.legend = F, draw_quantiles = 0.5, scale = "width") + 
+             facet_grid(individual~organ_name) + 
+             simple_theme + 
+             theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+             scale_fill_manual(values = tissue_colors_palette)
+         })
+
+plots
+```
+
+
+\pagebreak
+
+#Tissue wise clustering
+
+
+```{r pseudo_consensus, echo = F, warning = F, message = F, results=F}
+pig_data_consensus <- 
+  pig_data_norm %>%
+  group_by(enssscg_id,
+           tissue_ID,
+           tissue_name,
+           consensus_tissue_name,
+           organ_name) %>%
+  summarise(tpm = mean(tpm),
+            tmm = mean(tmm)) %>% 
+  ungroup()
+
+wide_tmm_pig_data_consensus <- 
+  pig_data_consensus %>%
+  select(1, 2, tmm) %>%
+  spread(key = tissue_ID, value = tmm) %>%
+  column_to_rownames("enssscg_id")
+
+```
+
+
+For each tissue, avarages were taken for each gene and a PCA was performed on the normalized data to reduce the number of dimensions in the data. This helps to remove noise and keep only the structures in the data that separates the features of our tissues from each other. Below, we see a plot showing R2 (The fraction of explained variance) and Q2 (crossvalidated R2, can approximately be explained as the amount of information the PCA model contains). We see that 95% R2 is reached at component 39, and we will thus choose 39 components as our dimensionally reduced data. We choose this arbitrary cutoff as we want to remove noise but still keep a majority of the structure in the data.
+
+```{r consensus_spearman, echo = F, warning = F, message = F, results=F}
+
+pig_consensus_pca_data <- 
+  wide_tmm_pig_data_consensus %>%
+  # Remove genes that are not expressed
+  {.[-which(rownames(.) %in% enssscg_not_expressed),]} %>% 
+  t() %>%
+  {log10(. + 1)}
+
+
+
+pig_consensus_pca <- 
+  pig_consensus_pca_data %>%
+  pca(nPcs = 50)
+
+
+if(file.exists("pig_consensus_pca_stats.RData")) {
+  load(file = "pig_consensus_pca_stats.RData")
+} else {
+  set.seed(42)
+  pig_consensus_pca_stats <- 
+    tibble(PC = 1:50, 
+           Q2 = Q2(pig_consensus_pca, originalData = pig_consensus_pca_data),
+           R2cum = R2cum(pig_consensus_pca),
+           prev_Q2 = c(NA, Q2[-length(Q2)]), 
+           Q2cum = prev_Q2 + (1 - prev_Q2) * Q2)
+  
+  save(pig_consensus_pca_stats, file = "pig_consensus_pca_stats.RData")
+}
+
+
+informative_comps_consensus <- pig_consensus_pca_stats$PC[which(pig_consensus_pca_stats$Q2 == max(pig_consensus_pca_stats$Q2))]
+informative_comps2_consensus <- pig_consensus_pca_stats$PC[which(pig_consensus_pca_stats$R2cum > 0.95)[1]]
+
+pig_consensus_pca_stats %>%
+  select(PC, R2cum, Q2) %>%
+  gather("stat", "value", -PC) %>%
+  ggplot(aes(PC, value, color = stat)) + 
+  geom_point() + 
+  geom_line() + 
+  simple_theme +
+  geom_vline(xintercept = c(informative_comps_consensus, informative_comps2_consensus), linetype = "dashed") + 
+  annotate("text", 
+           x = c(informative_comps_consensus + 1, informative_comps2_consensus - 1),
+           y = 0.55, 
+           label = paste0("PC ", c(informative_comps_consensus, informative_comps2_consensus)),
+           hjust = 0:1, 
+           vjust = 0) + 
+  annotate("text", 
+           x = c(informative_comps_consensus + 1, informative_comps2_consensus - 1) ,
+           y = c(pig_consensus_pca_stats[informative_comps_consensus, ]$Q2 + 0.01, pig_consensus_pca_stats[informative_comps2_consensus, ]$Q2 + 0.05), 
+           label = paste0("\nQ2 = ", round(c(pig_consensus_pca_stats[informative_comps_consensus, ]$Q2, pig_consensus_pca_stats[informative_comps2_consensus, ]$Q2), 3)),
+           hjust = 0:1, 
+           vjust = c(0, 1)) + 
+  annotate("text", 
+           x = c(informative_comps_consensus, informative_comps2_consensus - 1),
+           y = c(pig_consensus_pca_stats[informative_comps_consensus, ]$R2cum + 0.01, pig_consensus_pca_stats[informative_comps2_consensus, ]$R2cum + 0.01), 
+           label = paste0("\nR2 = ", round(c(pig_consensus_pca_stats[informative_comps_consensus, ]$R2cum, pig_consensus_pca_stats[informative_comps2_consensus, ]$R2cum), 3)),
+           hjust = c(0, 1), 
+           vjust = 1)
+
+
+```
+
+
+
+Below we see a dendrogram built from 1 - Spearman's rho between the tissues using all genes.
+
+```{r consensus_spearman_dendogram, echo = F, warning = F, message = F, results=F, fig.width=6, fig.height=10}
+
+# Calculate spearman correlation:
+sample_spearman_consensus <- 
+  wide_tmm_pig_data_consensus %>%
+  cor(method = "spearman")
+
+# Create spearman distance cluster:
+sample_spearman_clust_consensus <- 
+  sample_spearman_consensus %>%
+  {1 - .} %>%
+  as.dist() %>%
+  hclust("average")
+
+dendr <- dendro_data(sample_spearman_clust_consensus)
+
+
+dendro_plot_data <- 
+  left_join(dendr$segments, 
+            dendr$labels, 
+            by = c("x" = "x", "yend" = "y")) %>% 
+  mutate(tissue = label) %>%
+  left_join(tissue_mapping, 
+            by = c("tissue"))
+
+plot_spearman_dendrogram_consensus <- 
+  dendro_plot_data %>%
+  ggplot() +
+  geom_segment(aes(x=y, y=x, xend=yend, yend=xend, group = tissue))+
+  
+  geom_text(data = ggdendro::label(dendr) %>%
+              as_tibble() %>%
+              mutate(tissue = label) %>%
+              left_join(tissue_mapping, by = "tissue"),
+            aes(label=tissue_name,
+                x=0,
+                y=x,
+                color = tissue_name),
+            size = 3,
+            hjust = 0,
+            nudge_x = 0.005,
+            show.legend = F)+
+  # scale_y_continuous(limits = c(-0.25, 1.25),
+  #                    breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25))+
+  scale_color_manual(values = c(tissue_colors_palette))+
+  scale_x_reverse(expand = c(0, 0.18), breaks = c(0:4)/10)+
+  # scale_x_continuous(expand = c(0, 0.1))+
+  # theme_void()+
+  theme(axis.text.y = element_blank(), 
+        axis.title = element_blank(), 
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(1,1,1,1), units = "mm"), 
+        panel.background = element_blank()) 
+plot_spearman_dendrogram_consensus
+ggsave("Figures/Spearman dendrogram consensus.pdf", plot = plot_spearman_dendrogram_consensus, height = 7, width = 7, useDingbats = F)
+
+```
+
+Below is an alternative (and complementary) clustering of tissues using Ward clustering of PCA scores in the 39 selected components. This type of clustering is based on minimizing the variance within each cluster and thus takes distances into account, which correlation does not. 
+
+```{r consensus_PCA_level_dendogram, echo = F, warning = F, message = F, results=F, fig.width=6, fig.height=10}
+
+# Level
+
+sample_PCA_level_clust_consensus <- 
+  scores(pig_consensus_pca)[,1:informative_comps2_consensus] %>%
+  dist() %>%
+  hclust(method = "ward.D2") 
+
+dendr <- 
+  sample_PCA_level_clust_consensus %>%
+  dendro_data()
+
+dendro_plot_data <- 
+  left_join(dendr$segments, 
+            dendr$labels, 
+            by = c("x" = "x", "yend" = "y")) %>% 
+  rename(tissue = label) %>%
+  left_join(tissue_mapping, 
+            by = c("tissue"))
+
+plot_PCA_dist_dendrogram_consensus <- 
+  dendro_plot_data %>%
+  ggplot() +
+  geom_segment(aes(x=y, y=x, xend=yend, yend=xend, group = tissue))+
+  geom_text(data = ggdendro::label(dendr) %>%
+              as_tibble() %>%
+              rename(tissue = label) %>%
+              left_join(tissue_mapping, by = "tissue"),
+            aes(label=tissue_name,
+                x=0,
+                y=x,
+                color = tissue_name),
+            size = 3,
+            hjust = 0,
+            nudge_x = 1,
+            show.legend = F)+
+  # scale_y_continuous(limits = c(-0.25, 1.25),
+  #                    breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25))+
+  scale_color_manual(values = c(tissue_colors_palette))+
+  scale_x_reverse(expand = c(0.45, 0), breaks = (0:3)*50)+
+  # scale_x_continuous(expand = c(0.15, 0))+
+  # scale_x_continuous(expand = c(0, 0.1))+
+  # theme_void()+
+  theme(axis.text.y = element_blank(), 
+        axis.title = element_blank(), 
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(1,1,1,1), units = "mm"), 
+        panel.background = element_blank()) 
+
+plot_PCA_dist_dendrogram_consensus
+ggsave("Figures/PCA dist informative PCs dendrogram consensus.pdf", plot = plot_PCA_dist_dendrogram_consensus, height = 7, width = 7, useDingbats = F)
+
+```
+
+```{r spearman_restored_from_PCA_test, eval = F, include = F}
+
+scores(pig_consensus_pca)[,1:informative_comps2_consensus]
+
+loadings(pig_consensus_pca)[,1:informative_comps2_consensus]
+
+
+cor_per_PC <- 
+  lapply(1:20,
+         FUN = function(npc) {
+           a <-
+             t(scores(pig_consensus_pca)[,1:npc, drop = F] %*% 
+                 t(loadings(pig_consensus_pca)[,1:npc, drop = F])) + 
+             center(pig_consensus_pca) 
+           
+           
+           cor_a <- 
+             a %>%
+             cor(method = "spearman")
+           
+           # cor_a%>%
+           #   pheatmap(color = heatmap_palette,
+           #            border_color = NA, 
+           #            annotation_row = sample_pearson_meta, 
+           #            annotation_colors = list(Organ = tissue_colors_palette_organs),
+           #            annotation_legend = F,
+           #            show_colnames = F, 
+           #            annotation_names_row = F, 
+           #            clustering_method = "ward.D2")
+           # 
+           cor_a %>% 
+             as_tibble(rownames = "sample1") %>% 
+             gather("sample2", "cor", -1)
+         }) 
+
+cor_per_PC %>%
+  set_names(1:20) %>%
+  {.[1:2]} %>%
+  plyr::ldply(.id = "npc") %>%
+  as_tibble() %>%
+  filter(sample1 != sample2) %>%
+  mutate(tissue1 = gsub("_\\d$", "", sample1))
+
+
+a <-
+  t(scores(pig_consensus_pca)[,1:informative_comps2_consensus] %*% 
+      t(loadings(pig_consensus_pca)[,1:informative_comps2_consensus])) + 
+  center(pig_consensus_pca) 
+
+a %>% 
+  as_tibble(rownames = "enssscg_id") %>% 
+  gather("tissue", "tmm", -1) 
+
+a %>%
+  cor(method = "spearman") %>%
+  set_colnames(tissue_mapping$tissue_name[match(colnames(.), tissue_mapping$tissue)]) %>%
+  set_rownames(tissue_mapping$tissue_name[match(rownames(.), tissue_mapping$tissue)]) %>%
+  pheatmap(color = heatmap_palette,
+           border_color = NA, 
+           annotation_row = tissue_mapping %>% 
+             select(`Tissue name` = tissue_name) %>% 
+             as.data.frame() %>% 
+             set_rownames(.$`Tissue name`), 
+           annotation_colors = list(`Tissue name` = tissue_colors_palette),
+           annotation_legend = F,
+           show_colnames = F, 
+           annotation_names_row = F, 
+           clustering_method = "ward.D2")
+
+sample_spearman_consensus %>%
+  set_colnames(tissue_mapping$tissue_name[match(colnames(.), tissue_mapping$tissue)]) %>%
+  set_rownames(tissue_mapping$tissue_name[match(rownames(.), tissue_mapping$tissue)]) %>%
+  pheatmap(color = heatmap_palette,
+           border_color = NA, 
+           annotation_row = tissue_mapping %>% 
+             select(`Tissue name` = tissue_name) %>% 
+             as.data.frame() %>% 
+             set_rownames(.$`Tissue name`), 
+           annotation_colors = list(`Tissue name` = tissue_colors_palette),
+           annotation_legend = F,
+           show_colnames = F, 
+           annotation_names_row = F,
+           cluster_cols = sample_spearman_clust_consensus,
+           cluster_rows = sample_spearman_clust_consensus)
+```
+
+\pagebreak
+
+The following heatmap shows spearman correlation between tissues.
+
+```{r consensus_spearman_heatmaps, echo = F, warning = F, message = F, results=F}
+
+sample_spearman_consensus %>%
+  set_colnames(tissue_mapping$tissue_name[match(colnames(.), tissue_mapping$tissue)]) %>%
+  set_rownames(tissue_mapping$tissue_name[match(rownames(.), tissue_mapping$tissue)]) %>%
+  pheatmap(color = heatmap_palette,
+           border_color = NA, 
+           annotation_row = tissue_mapping %>% 
+             select(`Tissue name` = tissue_name) %>% 
+             as.data.frame() %>% 
+             set_rownames(.$`Tissue name`), 
+           annotation_colors = list(`Tissue name` = tissue_colors_palette),
+           annotation_legend = F,
+           show_colnames = F, 
+           annotation_names_row = F,
+           cluster_cols = sample_spearman_clust_consensus,
+           cluster_rows = sample_spearman_clust_consensus)
+
+sample_spearman_consensus %>%
+  set_colnames(tissue_mapping$tissue_name[match(colnames(.), tissue_mapping$tissue)]) %>%
+  set_rownames(tissue_mapping$tissue_name[match(rownames(.), tissue_mapping$tissue)]) %>%
+  pheatmap(color = heatmap_palette,
+           border_color = NA, 
+           annotation_row = tissue_mapping %>% 
+             select(`Tissue name` = tissue_name) %>% 
+             as.data.frame() %>% 
+             set_rownames(.$`Tissue name`), 
+           annotation_colors = list(`Tissue name` = tissue_colors_palette),
+           annotation_legend = F,
+           show_colnames = F, 
+           annotation_names_row = F,
+           cluster_cols = sample_spearman_clust_consensus,
+           cluster_rows = sample_spearman_clust_consensus, 
+           filename = "Figures/Spearman heatmap consensus.pdf", 
+           height = 7, 
+           width = 9, 
+           useDingbats = F)
+
+
+# scores(pig_consensus_pca)[,1:informative_comps2_consensus] %>%
+#   # dist() %>%
+#   # as.matrix() %>%
+#   # set_colnames(tissue_mapping$tissue_name[match(colnames(.), tissue_mapping$tissue)]) %>%
+#   set_rownames(tissue_mapping$tissue_name[match(rownames(.), tissue_mapping$tissue)]) %>%
+#   pheatmap(color = heatmap_palette,
+#            border_color = NA, 
+#            annotation_row = tissue_mapping %>% 
+#              select(`Tissue name` = tissue_name) %>% 
+#              as.data.frame() %>% 
+#              set_rownames(.$`Tissue name`), 
+#            annotation_colors = list(`Tissue name` = tissue_colors_palette),
+#            annotation_legend = F,
+#            show_colnames = F, 
+#            annotation_names_row = F,
+#            cluster_cols = F,
+#            # cluster_rows = sample_PCA_level_clust_consensus,
+#            clustering_method = "ward.D2")
+ 
+
+
+```
+
+
+
+```{r compare_clustering_Test, eval = F, include = F}
+
+left_join(dendro_data(sample_PCA_level_clust_consensus)$labels,
+          dendro_data(sample_spearman_clust_consensus)$labels,
+          by = "label",
+          suffix = c("_level", "_spearman")) %>% 
+  as_tibble() %>%
+  left_join(tissue_mapping,
+            by = c("label" = "tissue")) %>%
+  ggplot(aes(x_level, x_spearman, color = tissue_name, label = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  geom_text(show.legend = F) +
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme
+
+
+distance_comparison <- 
+  left_join(scores(pig_consensus_pca)[,1:informative_comps2_consensus] %>%
+              dist() %>%
+              scales::rescale(to = c(min(1-sample_spearman_consensus), 
+                                     max(1-sample_spearman_consensus))) %>%
+              as.matrix() %>%
+              # {temp <- .
+              # temp[upper.tri(temp, diag = T)] <- NA
+              # temp} %>%
+              as_tibble(rownames = "tissue1") %>%
+              gather("tissue2", "PCA_dist", -1) %>%
+              filter(!is.na(PCA_dist)),
+            sample_spearman_consensus %>%
+            {1 - .} %>%
+              as.dist() %>%
+              as.matrix() %>%
+              # {temp <- .
+              # temp[upper.tri(temp, diag = T)] <- NA
+              # temp} %>%
+              as_tibble(rownames = "tissue1") %>%
+              gather("tissue2", "spearman_dist", -1) %>%
+              filter(!is.na(spearman_dist)),
+            by = c("tissue1", "tissue2")) %>%
+  left_join(tissue_mapping %>%
+              select(tissue, tissue_name1 = tissue_name),
+            by = c("tissue1" = "tissue")) %>%
+  left_join(tissue_mapping %>%
+              select(tissue, tissue_name2 = tissue_name),
+            by = c("tissue2" = "tissue"))
+
+
+distance_comparison  %>%
+
+  ggplot(aes(PCA_dist, spearman_dist, color = tissue_name2)) + 
+  geom_point(show.legend = F, alpha = 0.5) + 
+    simple_theme + 
+  scale_color_manual(values = tissue_colors_palette)
+
+
+combined_distance <- 
+  distance_comparison %>%
+  mutate(combined_dist = mapply(PCA_dist, spearman_dist,
+                                FUN = function(a,b) mean(c(a, b)))) %>%
+  select(tissue1, tissue2, combined_dist) %>%
+  spread(tissue2, combined_dist) %>%
+  column_to_rownames("tissue1") %>%
+  as.matrix()
+
+combined_distance %>%
+  pheatmap(clustering_method = "ward.D2")
+
+
+combined_clust <- 
+  combined_distance %>%
+  as.dist() %>%
+  hclust(method = "ward.D2") 
+
+dendr <- 
+  combined_clust %>%
+  dendro_data()
+
+dendro_plot_data <- 
+  left_join(dendr$segments, 
+            dendr$labels, 
+            by = c("x" = "x", "yend" = "y")) %>% 
+  rename(tissue = label) %>%
+  left_join(tissue_mapping, 
+            by = c("tissue"))
+
+plot_combined_dist_dendrogram_consensus <- 
+  dendro_plot_data %>%
+  ggplot() +
+  geom_segment(aes(x=y, y=x, xend=yend, yend=xend, group = tissue))+
+  geom_text(data = ggdendro::label(dendr) %>%
+              as_tibble() %>%
+              rename(tissue = label) %>%
+              left_join(tissue_mapping, by = "tissue"),
+            aes(label=tissue_name,
+                x=0,
+                y=x,
+                color = tissue_name),
+            size = 3,
+            hjust = 0,
+            nudge_x = 0.01,
+            show.legend = F)+
+  # scale_y_continuous(limits = c(-0.25, 1.25),
+  #                    breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25))+
+  scale_color_manual(values = c(tissue_colors_palette))+
+  scale_x_reverse(expand = c(0.45, 0), breaks = (0:4)/4)+
+  # scale_x_continuous(expand = c(0.15, 0))+
+  # scale_x_continuous(expand = c(0, 0.1))+
+  # theme_void()+
+  theme(axis.text.y = element_blank(), 
+        axis.title = element_blank(), 
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(1,1,1,1), units = "mm"), 
+        panel.background = element_blank()) 
+
+
+plot_combined_dist_dendrogram_consensus
+
+```
+
+```{r compare_clustering_method_test, eval = F, include = F}
+mets <- c("ward.D", "ward.D2", "single", "complete", "average", "mcquitty", "median", "centroid")
+
+correlation_methods_plots <- lapply(mets,
+                                    FUN = function(met) {
+                                      sample_spearman_clust_consensus <- 
+                                        sample_spearman_consensus %>%
+                                        {1 - .} %>%
+                                        as.dist() %>%
+                                        hclust(met)
+                                      
+                                      dendr <- dendro_data(sample_spearman_clust_consensus)
+                                      
+                                      
+                                      dendro_plot_data <- 
+                                        left_join(dendr$segments, 
+                                                  dendr$labels, 
+                                                  by = c("x" = "x", "yend" = "y")) %>% 
+                                        mutate(tissue = label) %>%
+                                        left_join(tissue_mapping, 
+                                                  by = c("tissue"))
+                                      
+                                      dendro_plot_data %>%
+                                        ggplot() +
+                                        geom_segment(aes(x=y, y=x, xend=yend, yend=xend, group = tissue))+
+                                        
+                                        geom_text(data = ggdendro::label(dendr) %>%
+                                                    as_tibble() %>%
+                                                    mutate(tissue = label) %>%
+                                                    left_join(tissue_mapping, by = "tissue"),
+                                                  aes(label=tissue_name,
+                                                      x=0,
+                                                      y=x,
+                                                      color = tissue_name),
+                                                  size = 3,
+                                                  hjust = 0,
+                                                  nudge_x = 0.005,
+                                                  show.legend = F)+
+                                        # scale_y_continuous(limits = c(-0.25, 1.25),
+                                        #                    breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25))+
+                                        scale_color_manual(values = c(tissue_colors_palette))+
+                                        scale_x_reverse(expand = c(0, 0.18), breaks = c(0:4)/10)+
+                                        # scale_x_continuous(expand = c(0, 0.1))+
+                                        # theme_void()+
+                                        theme(axis.text.y = element_blank(), 
+                                              axis.title = element_blank(), 
+                                              axis.ticks.y = element_blank(),
+                                              plot.margin = unit(c(1,1,1,1), units = "mm"), 
+                                              panel.background = element_blank()) +
+                                        ggtitle(met)
+                                    })
+
+
+
+correlation_methods_plots2 <- lapply(mets,
+                                    FUN = function(met) {
+                                      sample_PCA_level_clust_consensus <- 
+                                        scores(pig_consensus_pca)[,1:informative_comps2_consensus] %>%
+                                        dist() %>%
+                                        hclust(method = met) 
+                                      
+                                      dendr <- 
+                                        sample_PCA_level_clust_consensus %>%
+                                        dendro_data()
+                                      
+                                      dendro_plot_data <- 
+                                        left_join(dendr$segments, 
+                                                  dendr$labels, 
+                                                  by = c("x" = "x", "yend" = "y")) %>% 
+                                        rename(tissue = label) %>%
+                                        left_join(tissue_mapping, 
+                                                  by = c("tissue"))
+                                      
+                                      plot_PCA_dist_dendrogram_consensus <- 
+                                        dendro_plot_data %>%
+                                        ggplot() +
+                                        geom_segment(aes(x=y, y=x, xend=yend, yend=xend, group = tissue))+
+                                        geom_text(data = ggdendro::label(dendr) %>%
+                                                    as_tibble() %>%
+                                                    rename(tissue = label) %>%
+                                                    left_join(tissue_mapping, by = "tissue"),
+                                                  aes(label=tissue_name,
+                                                      x=0,
+                                                      y=x,
+                                                      color = tissue_name),
+                                                  size = 3,
+                                                  hjust = 0,
+                                                  nudge_x = 1,
+                                                  show.legend = F)+
+                                        # scale_y_continuous(limits = c(-0.25, 1.25),
+                                        #                    breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25))+
+                                        scale_color_manual(values = c(tissue_colors_palette))+
+                                        scale_x_reverse(expand = c(0.45, 0), breaks = (0:3)*50)+
+                                        # scale_x_continuous(expand = c(0.15, 0))+
+                                        # scale_x_continuous(expand = c(0, 0.1))+
+                                        # theme_void()+
+                                        theme(axis.text.y = element_blank(), 
+                                              axis.title = element_blank(), 
+                                              axis.ticks.y = element_blank(),
+                                              plot.margin = unit(c(1,1,1,1), units = "mm"), 
+                                              panel.background = element_blank()) +
+                                        ggtitle(met)
+                                    })
+
+
+pdf("Figures/Correlation methods test.pdf", width = 12, height = 8, useDingbats = F)
+correlation_methods_plots
+dev.off()
+
+pdf("Figures/Correlation methods test 2.pdf", width = 12, height = 8, useDingbats = F)
+correlation_methods_plots2
+dev.off()
+```
+
+\pagebreak
+
+Below we see three plots showing the twodimensional projections of the data using three different strategies:
+1. PCA
+
+```{r consensus_clustering_PCA, echo = F, warning = F, message = F, results=F, fig.height=10, fig.height=10}
+
+
+# Consensus PCA
+
+pca_scores_consensus <- 
+  scores(pig_consensus_pca)[,1:informative_comps2_consensus] %>%
+  as_tibble(rownames = "tissue")  %>%
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+
+
+pca_plot_consensus_no_text <- 
+  pca_scores_consensus %>%
+  ggplot(aes(PC1, PC2, color = tissue_name, label = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme 
+
+pca_plot_consensus <- 
+  pca_plot_consensus_no_text +
+  geom_text_repel(show.legend = F)
+
+pca_plot_consensus + 
+  ggtitle("PCA")
+
+ggsave("Figures/PCA consensus plot big.pdf", plot = pca_plot_consensus, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/PCA consensus plot.pdf", plot = pca_plot_consensus, height = 8, width = 8, useDingbats = F)
+
+ggsave("Figures/PCA consensus plot big no text.pdf", plot = pca_plot_consensus_no_text, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/PCA consensus plot no text.pdf", plot = pca_plot_consensus_no_text, height = 8, width = 8, useDingbats = F)
+
+```
+
+\pagebreak
+
+2. UMAP
+
+```{r consensus_clustering_UMAP, echo = F, warning = F, message = F, results=F, fig.height=10, fig.height=10}
+
+
+
+# UMAP consensus
+
+
+set.seed(42)
+
+umap_res_consensus <- 
+  pig_consensus_pca_data %>%
+  umap(n_components = 2,
+       n_epochs = 1000)
+
+umap_scores_consensus <- 
+  umap_res_consensus$layout %>%
+  as_tibble(rownames = "tissue") %>%
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+umap_plot_consensus_no_text <- 
+  umap_scores_consensus %>%
+  ggplot(aes(V1, V2, color = tissue_name, label = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme 
+
+umap_plot_consensus <- 
+  umap_plot_consensus_no_text + 
+  geom_text_repel(show.legend = F)
+
+umap_plot_consensus + 
+  ggtitle("UMAP")
+
+ggsave("Figures/UMAP consensus plot big.pdf", plot = umap_plot_consensus, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/UMAP consensus plot.pdf", plot = umap_plot_consensus, height = 8, width = 8, useDingbats = F)
+
+ggsave("Figures/UMAP consensus plot big no text.pdf", plot = umap_plot_consensus_no_text, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/UMAP consensus plot no text.pdf", plot = umap_plot_consensus_no_text, height = 8, width = 8, useDingbats = F)
+
+
+```
+
+\pagebreak
+
+3. UMAP on 39 PCs from PCA
+
+```{r consensus_clustering_UMAP_on_PCA, echo = F, warning = F, message = F, results=F, fig.height=10, fig.height=10}
+
+
+
+
+# UMAP of PCA consensus
+
+
+set.seed(42)
+
+umap_res_PCA_consensus <- 
+  scores(pig_consensus_pca)[,1:informative_comps2_consensus] %>%
+  umap(n_components = 2,
+       n_epochs = 1000)
+
+umap_scores_PCA_consensus <- 
+  umap_res_PCA_consensus$layout %>%
+  as_tibble(rownames = "tissue") %>%
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+umap_plot_PCA_consensus_no_text <- 
+  umap_scores_PCA_consensus %>%
+  ggplot(aes(V1, V2, color = tissue_name, label = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme 
+
+umap_plot_PCA_consensus <- 
+  umap_plot_PCA_consensus_no_text + 
+  geom_text_repel(show.legend = F)
+
+umap_plot_PCA_consensus +
+  ggtitle("UMAP on PCA")
+
+ggsave("Figures/UMAP PCA consensus plot big.pdf", plot = umap_plot_PCA_consensus, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/UMAP PCA consensus plot.pdf", plot = umap_plot_PCA_consensus, height = 8, width = 8, useDingbats = F)
+
+ggsave("Figures/UMAP PCA consensus plot big no text.pdf", plot = umap_plot_PCA_consensus_no_text, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/UMAP PCA consensus plot no text.pdf", plot = umap_plot_PCA_consensus_no_text, height = 8, width = 8, useDingbats = F)
+
+
+```
+
+\pagebreak
+
+
+#Sample wise clustering
+
+```{r correlation_functions, echo=F}
+
+plot_dendrogram <- function(hcl, colors) {
+  labels <- 
+    dendro_data(hcl) %>%
+    label() %>% 
+    as_tibble() 
+  
+  dendro_data(hcl) %>% 
+    {ggplot(segment(.)) +
+        geom_segment(aes(x=x, y=y, xend=xend, yend=yend))+
+        geom_text(data = labels, 
+                  aes(label=label, 
+                      x=x, 
+                      y=0, 
+                      color = label), 
+                  size = 3, 
+                  angle = 90, 
+                  hjust = 1, 
+                  show.legend = F)+
+        scale_y_continuous(limits = c(-0.25, 1.25), 
+                           breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25))+
+        scale_color_manual(values = colors)+
+        theme_void()+
+        theme(axis.text.y = element_blank(), plot.margin = unit(c(1,1,1,1), units = "mm"))}
+}
+
+calc_mah <- function(x, tis_) {
+  
+  x2 <- 
+    x %>%
+    ungroup() %>%
+    filter(tissue == unique(tis_)) %>%
+    select(1, grep("PC", names(x))) %>%
+    column_to_rownames(names(x)[1]) %>%
+    as.matrix() 
+  
+  tryCatch(x2 %>%
+             mahalanobis(center = colMeans(.), 
+                         cov = cov(.), 
+                         tol = 1e-25),
+           error = function(e) {
+             return(rep(NA, dim(x2)[1]))
+           })
+  
+  
+}
+
+
+calc_mean_cor <- function(x, tis_, method) {
+  
+  x2 <- 
+    x %>%
+    ungroup() %>%
+    filter(tissue == unique(tis_)) %>%
+    select(1, grep("PC", names(x))) %>%
+    column_to_rownames(names(x)[1]) %>%
+    as.matrix() 
+  
+  x2 %>%
+    t() %>%
+    cor(method = method) %>% 
+    apply(MARGIN = 1, 
+          FUN = function(x) {
+            mean(sort(x, decreasing = T)[-1])
+          })
+  
+  
+}
+
+ex_sd <- function(x) {
+  sapply(1:length(x), 
+         FUN = function(z) {
+           sd(x[-z])
+         })
+}
+
+ex_mean <- function(x) {
+  sapply(1:length(x), 
+         FUN = function(z) {
+           mean(x[-z])
+         })
+}
+```
+
+
+
+To investigate if we have any outliers or sample mixups we again perform a PCA, but this time on the full data. That is, we do not perform any avaraging between samples of the same tissue. We see that 92 PCs represent 95% of the variance.
+
+```{r PCA_comps, echo = F, warning = F, message = F, results=F}
+
+
+pig_pca_data <- 
+  wide_tmm_pig_data %>%
+  # Remove genes that are not expressed
+  {.[-which(rownames(.) %in% enssscg_not_expressed),]} %>% 
+  t() %>%
+  {log10(. + 1)}
+
+pig_pca <- 
+  pig_pca_data %>%
+  pca(nPcs = 100)
+
+
+if(file.exists("pig_pca_stats.RData")) {
+  load(file = "pig_pca_stats.RData")
+} else {
+  set.seed(42)
+  pig_pca_stats <- 
+    tibble(PC = 1:100, 
+           Q2 = Q2(pig_pca, originalData = pig_pca_data),
+           R2cum = R2cum(pig_pca),
+           prev_Q2 = c(NA, Q2[-length(Q2)]), 
+           Q2cum = prev_Q2 + (1 - prev_Q2) * Q2)
+  
+  save(pig_pca_stats, file = "pig_pca_stats.RData")
+}
+
+
+informative_comps <- pig_pca_stats$PC[which(pig_pca_stats$Q2 == max(pig_pca_stats$Q2, na.rm = T))]
+informative_comps2 <- pig_pca_stats$PC[which(pig_pca_stats$R2cum > 0.95)[1]]
+
+
+pig_pca_stats %>%
+  select(PC, R2cum, Q2) %>%
+  gather("stat", "value", -PC) %>%
+  ggplot(aes(PC, value, color = stat)) + 
+  geom_point() + 
+  geom_line() + 
+  simple_theme +
+  geom_vline(xintercept = c(informative_comps, informative_comps2), linetype = "dashed") + 
+  annotate("text", 
+           x = c(informative_comps + 1, informative_comps2 - 1),
+           y = 0.55, 
+           label = paste0("PC ", c(informative_comps, informative_comps2)),
+           hjust = 0:1, 
+           vjust = 0) + 
+  annotate("text", 
+           x = c(informative_comps + 1, informative_comps2 - 1) ,
+           y = c(pig_pca_stats[informative_comps, ]$Q2 + 0.01, pig_pca_stats[informative_comps2, ]$Q2), 
+           label = paste0("\nQ2 = ", round(c(pig_pca_stats[informative_comps, ]$Q2, pig_pca_stats[informative_comps2, ]$Q2), 3)),
+           hjust = 0:1, 
+           vjust = c(0, 1)) + 
+  annotate("text", 
+           x = c(informative_comps, informative_comps2 - 1),
+           y = c(pig_pca_stats[informative_comps, ]$R2cum + 0.01, pig_pca_stats[informative_comps2, ]$R2cum + 0.01), 
+           label = paste0("\nR2 = ", round(c(pig_pca_stats[informative_comps, ]$R2cum, pig_pca_stats[informative_comps2, ]$R2cum), 3)),
+           hjust = c(0, 1), 
+           vjust = 1)
+
+ggsave("Figures/PCA R2Q2 plot.pdf", height = 5, width = 6, useDingbats = F)
+
+# scores(pig_pca) %>% 
+#   as_tibble(rownames = "sample_ID") %>% 
+#   gather("PC", "score", -1) %>% 
+#   mutate(PC = factor(gsub("PC", "", PC), levels = 1:50)) %>% 
+#   ggplot(aes(PC, score)) + 
+#   geom_boxplot() + 
+#   simple_theme
+```
+
+```{r PCA_comps_plots_mahalanobis_,echo = F, warning = F, message = F, results=F}
+
+
+sample_mah <- 
+  scores(pig_pca)[,1:informative_comps2] %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+  group_by(tissue) %>%
+  
+  mutate(mahalanobis = calc_mah(., tissue),
+         mean_pearson = calc_mean_cor(., tissue, method = "pearson"),
+         mean_spearman = calc_mean_cor(., tissue, method = "spearman")) %>%
+  select(1:3, mahalanobis, mean_pearson, mean_spearman) %>%
+  mutate(sd_mah = sd(mahalanobis),
+         mean_mah = mean(mahalanobis),
+         scaled_mah = (mahalanobis - mean_mah) / sd_mah,
+         
+         sd_mah_ex = ex_sd(mahalanobis),
+         mean_mah_ex = ex_mean(mahalanobis),
+         scaled_mah_ex = (mahalanobis - mean_mah_ex) / sd_mah_ex,
+         
+         median_mah = median(mahalanobis),
+         scaled_mah_med = (mahalanobis - median_mah) / sd_mah_ex, 
+         
+         mean_mean_pearson = mean(mean_pearson),
+         sd_pearson = sd(mean_pearson), 
+         scaled_pearson = (mean_pearson - mean_mean_pearson) / sd_pearson)
+#     
+# mean distance + sd
+# sample_mah %>%
+#   mutate(outlier = abs(scaled_mah) > 2,
+#          label = ifelse(outlier, sample_ID, NA)) %>%
+#   ggplot(aes(sample_ID, scaled_mah, fill = outlier, label = label)) +
+#   geom_col() +
+#   geom_text_repel() +
+#   simple_theme +
+#   theme(axis.text.x = element_blank())
+# 
+# # mean distance  + sd excluding own observation
+# sample_mah %>%
+#   mutate(outlier = abs(scaled_mah_ex) > 5,
+#          label = ifelse(outlier, sample_ID, NA)) %>%
+#   ggplot(aes(sample_ID, scaled_mah_ex, fill = outlier, label = label)) +
+#   geom_col() +
+#   geom_text_repel() +
+#   simple_theme +
+#   theme(axis.text.x = element_blank())
+# 
+# # median distance + sd excluding
+# sample_mah %>%
+#   mutate(outlier = abs(scaled_mah_med) > 5,
+#          label = ifelse(outlier, sample_ID, NA)) %>%
+#   ggplot(aes(sample_ID, scaled_mah_med, fill = outlier, label = label)) +
+#   geom_col() +
+#   geom_text_repel() +
+#   simple_theme +
+#   theme(axis.text.x = element_blank())
+# 
+# # mean pearson
+# sample_mah %>%
+#   left_join(tissue_mapping,
+#             by = "tissue") %>%
+#   ggplot(aes(individual, mean_pearson)) +
+#   geom_col() +
+#   # geom_text_repel() +
+#   simple_theme +
+#   theme(axis.text.x = element_blank()) +
+#   facet_wrap(~tissue_name)
+# 
+# 
+# sample_mah %>%
+#   ggplot(aes(mean_pearson, mean_spearman)) +
+#   geom_point() +
+#   simple_theme
+```
+
+
+```{r heatmap_pc_scores, echo = F, warning = F, message = F, results=F, fig.height=10}
+
+sample_pearson_meta <-
+  tibble(sample_ID = rownames(scores(pig_pca))) %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_") %>% 
+  left_join(tissue_colors, 
+            by = "tissue") %>% 
+  unite(col = "sample_ID", tissue, individual, sep = "_") %>%
+  select(1, 
+         # Tissue = tissue_name,
+         # `Tissue group` = tissue_group, 
+         Organ = organ_name) %>%
+  column_to_rownames("sample_ID")
+
+
+# scores(pig_pca) %>% 
+#   pheatmap(annotation_row = sample_pearson_meta,
+#            annotation_colors = list(Organ = tissue_colors_palette_organs),
+#            border_color = NA, 
+#            cluster_cols = F, 
+#            clustering_method = "ward.D2")
+
+```
+
+```{r heatmap_pc_scores_consensus, echo = F, warning = F, message = F, results=F, fig.height=10}
+
+sample_pearson_meta_consensus <-
+  tibble(tissue = rownames(scores(pig_consensus_pca))) %>%
+  left_join(tissue_mapping, 
+            by = "tissue") %>% 
+  select(1, 
+         # Tissue = tissue_name,
+         # `Tissue group` = tissue_group, 
+         Organ = organ_name) %>%
+  column_to_rownames("tissue")
+
+
+# scores(pig_consensus_pca) %>% 
+#   pheatmap(annotation_row = sample_pearson_meta_consensus,
+#            annotation_colors = list(Organ = tissue_colors_palette_organs),
+#            border_color = NA, 
+#            cluster_cols = F, 
+#            clustering_method = "ward.D2")
+
+```
+
+```{r PCA_correlation_samples2, echo = F, warning = F, message = F, results=F}
+
+sample_PCA_pearson <- 
+  scores(pig_pca)[,1:informative_comps2] %>% 
+  t() %>%
+  cor(method = "pearson")
+sample_PCA_spearman <- 
+  scores(pig_pca)[,1:informative_comps2] %>% 
+  t() %>%
+  cor(method = "spearman")
+
+
+# sample_PCA_spearman %>%
+#   pheatmap(breaks = seq(-1, 1, 0.02),
+#            # cluster_cols = sample_spearman_clust,
+#            # cluster_rows = sample_spearman_clust, 
+#            clustering_method = "ward.D2",
+#            annotation_row = sample_pearson_meta,
+#            annotation_colors = list(Organ = tissue_colors_palette_organs),
+#            border_color = NA)
+# 
+# sample_PCA_pearson %>%
+#   pheatmap(breaks = seq(-1, 1, 0.02),
+#            # cluster_cols = sample_spearman_clust,
+#            # cluster_rows = sample_spearman_clust, 
+#            clustering_method = "ward.D2",
+#            annotation_row = sample_pearson_meta,
+#            annotation_colors = list(Organ = tissue_colors_palette_organs),
+#            border_color = NA)
+#   
+
+pdf("Figures/Pig tissue outlier heatmaps.pdf", width = 16, height = 12, useDingbats = F)
+plots_PC_correlation <- 
+  sapply(tissues_in_data, 
+       FUN = function(tis_) {
+         tis_name <- tissue_mapping[which(tis_ == tissue_mapping$tissue),]$tissue_name
+         
+         if(dim(sample_PCA_pearson %>%
+         {.[, grep(tis_, colnames(sample_PCA_pearson), value = T), drop = F]})[2] < 2) return()
+         
+         plot_pear <- 
+           sample_PCA_pearson %>%
+           {.[, grep(tis_, colnames(sample_PCA_pearson), value = T)]} %>%
+           pheatmap(breaks = seq(-1, 1, 0.02),
+                    annotation_row = sample_pearson_meta,
+                    annotation_colors = list(Organ = tissue_colors_palette_organs),
+                    annotation_legend = F,
+                    clustering_method = "ward.D2",
+                    main = paste(tis_name, "- pearson"),
+                    border_color = NA, 
+                    silent = T, 
+                    legend = F)
+         
+         plot_spear <- 
+           sample_PCA_spearman %>%
+           {.[, grep(tis_, colnames(sample_PCA_spearman), value = T)]} %>%
+           pheatmap(breaks = seq(-1, 1, 0.02),
+                    annotation_row = sample_pearson_meta,
+                    annotation_colors = list(Organ = tissue_colors_palette_organs),
+                    annotation_legend = F,
+                    clustering_method = "ward.D2",
+                    main = paste(tis_name, "- spearman"),
+                    border_color = NA, 
+                    silent = T, 
+                    legend = F)
+         
+         grid.arrange(plot_pear[[4]], plot_spear[[4]], ncol = 2)
+         
+       })
+dev.off()
+
+# 
+# grid::grid.draw(plots[[1]])
+# dev.off()
+# grid::grid.draw(plots[[6]])
+# dev.off()
+# grid::grid.draw(plots[[7]])
+# dev.off()
+# grid::grid.draw(plots[[15]])
+# dev.off()
+# grid::grid.draw(plots[[18]])
+# dev.off()
+# grid::grid.draw(plots[[21]])
+# dev.off()
+# grid::grid.draw(plots[[24]])
+# dev.off()
+# grid::grid.draw(plots[[25]])
+# dev.off()
+# grid::grid.draw(plots[[26]])
+# dev.off()
+# grid::grid.draw(plots[[27]])
+# dev.off()
+# grid::grid.draw(plots[[39]])
+# dev.off()
+# grid::grid.draw(plots[[43]])
+# dev.off()
+# grid::grid.draw(plots[[46]])
+# dev.off()
+# grid::grid.draw(plots[[48]])
+# dev.off()
+# grid::grid.draw(plots[[51]])
+# dev.off()
+# grid::grid.draw(plots[[52]])
+# dev.off()
+# grid::grid.draw(plots[[53]])
+# dev.off()
+# grid::grid.draw(plots[[57]])
+# dev.off()
+# grid::grid.draw(plots[[58]])
+# dev.off()
+# grid::grid.draw(plots[[59]])
+# dev.off()
+# grid::grid.draw(plots[[60]])
+# dev.off()
+# grid::grid.draw(plots[[61]])
+# dev.off()
+# grid::grid.draw(plots[[64]])
+# dev.off()
+
+# pearson_cor_outlier_tissues <- 
+#   tissues_in_data[c(1,6,7,15,18,21,24,25,26,27,39,43,46,48,51,52,53,57,58,59,60,61,64)]
+
+# tissue_mapping$tissue_name[which(tissue_mapping$tissue %in% pearson_cor_outlier_tissues)]
+
+
+plots_PC_correlation_only_spearman <- 
+  sapply(tissues_in_data, 
+       FUN = function(tis_) {
+         tis_name <- tissue_mapping[which(tis_ == tissue_mapping$tissue),]$tissue_name
+         
+         if(dim(sample_PCA_spearman %>%
+         {.[, grep(tis_, colnames(sample_PCA_spearman), value = T), drop = F]})[2] < 2) return(ggplot())
+         
+         plot_spear <- 
+           sample_PCA_spearman %>%
+           {.[, grep(tis_, colnames(sample_PCA_spearman), value = T)]} %>%
+           set_colnames(str_extract(colnames(.), ".$")) %>%
+           pheatmap(breaks = seq(-1, 1, 0.02),
+                    annotation_row = sample_pearson_meta,
+                    annotation_colors = list(Organ = tissue_colors_palette_organs),
+                    annotation_legend = F,
+                    clustering_method = "ward.D2",
+                    main = "spearman Ward 2",
+                    border_color = NA, 
+                    silent = T, 
+                    legend = F)
+         
+         plot_spear[[4]]
+         
+       })
+
+
+```
+
+
+
+```{r correlation_1, echo = F, warning = F, message = F, results=F}
+
+
+# Calculate spearman correlation:
+sample_spearman <- 
+  wide_tmm_pig_data %>%
+  cor(method = "spearman")
+
+# Calculate pearson correlation:
+sample_pearson <- 
+  wide_tmm_pig_data %>%
+  cor(method = "pearson")
+
+# Create spearman distance cluster:
+sample_spearman_clust <- 
+  wide_tmm_pig_data %>%
+  # Remove genes that are not expressed
+  {.[-which(rownames(.) %in% enssscg_not_expressed),]} %>% 
+  # Scale per gene
+  t() %>%
+  scale(center = F) %>% 
+  t() %>%
+  cor(method = "spearman") %>%
+  {1 - .} %>%
+  as.dist() %>%
+  hclust("average")
+
+
+# Create spearman PCA cluster:
+sample_PCA_spearman_clust <- 
+  sample_PCA_spearman %>%
+  {1 - .} %>%
+  as.dist() %>%
+  hclust("average")
+
+
+
+```
+
+```{r BM_spearman, eval = F, include = F}
+
+sample_spearman[which(grepl("BM", rownames(sample_spearman))), which(grepl("BM", rownames(sample_spearman)))] %>% 
+  pheatmap()
+
+sample_spearman[which(grepl("Joia", rownames(sample_spearman))), which(grepl("Joia", rownames(sample_spearman)))] %>% 
+  pheatmap()
+
+```
+
+\pagebreak
+
+Hierarchical clustering of individual samples. Individuals are displayed to the left and the tissue name to the right for each sample. Below we see a dendrogram built from 1 - Spearman's rho between the tissues using all genes.
+
+
+```{r correlation_2_tpm, echo = F, warning = F, message = F, results=F, fig.height=20, fig.width=10}
+# Extract colors per every sample
+sample_color <- 
+  tibble(sample_ID = rownames(sample_spearman)) %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+  left_join(tissue_colors, 
+            by = "tissue") %$%
+  set_names(tissue_color, sample_ID)
+
+dendr <- dendro_data(sample_spearman_clust)
+
+
+dendro_plot_data <- 
+  left_join(dendr$segments, 
+            dendr$labels, 
+            by = c("x" = "x", "yend" = "y")) %>% 
+  separate(col = label, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = c("tissue"))
+
+plot_spearman_dendrogram <- 
+  dendro_plot_data %>%
+  ggplot() +
+  geom_segment(aes(x=y, y=x, xend=yend, yend=xend, group = tissue))+
+  geom_text(data = ggdendro::label(dendr) %>%
+              as_tibble() %>%
+              separate(col = label, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+              left_join(tissue_mapping, by = "tissue"),
+            aes(label=individual,
+                x=0,
+                y=x,
+                color = label),
+            size = 3,
+            hjust = 0,
+            show.legend = F)+
+  geom_text(data = ggdendro::label(dendr) %>%
+              as_tibble() %>%
+              separate(col = label, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+              left_join(tissue_mapping, by = "tissue"),
+            aes(label=tissue_name,
+                x=0,
+                y=x,
+                color = tissue_name),
+            size = 3,
+            hjust = 0,
+            nudge_x = 0.02,
+            show.legend = F)+
+  # scale_y_continuous(limits = c(-0.25, 1.25),
+  #                    breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25))+
+  scale_color_manual(values = c(sample_color, tissue_colors_palette))+
+  scale_x_reverse(expand = c(0, 0.2))+
+  # scale_x_continuous(expand = c(0, 0.1))+
+  # theme_void()+
+  theme(axis.text.y = element_blank(), 
+        axis.title = element_blank(), 
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(1,1,1,1), units = "mm"), 
+        panel.background = element_blank()) 
+plot_spearman_dendrogram
+ggsave("Figures/Spearman dendrogram.pdf", plot = plot_spearman_dendrogram, height = 20, width = 12, useDingbats = F)
+
+
+plots_spearman_dendrogram_zoom <- 
+  lapply(tissues_in_data,
+       FUN = function(tis_) {
+         plot_spearman_dendrogram + 
+           facet_zoom(xy = tissue == tis_) + 
+           geom_segment(data = dendro_plot_data %>% 
+                          filter(tissue == tis_),
+                        aes(x=y, y=x, xend=yend, yend=xend, group = tissue),
+                        size = 3, 
+                        color = "red",
+                        alpha = 0.5)
+       })
+
+
+plots_correlation_only_spearman <- 
+  sapply(tissues_in_data, 
+       FUN = function(tis_) {
+         tis_name <- tissue_mapping[which(tis_ == tissue_mapping$tissue),]$tissue_name
+         
+         if(dim(sample_spearman %>%
+         {.[, grep(tis_, colnames(sample_spearman), value = T), drop = F]})[2] < 2) return(ggplot())
+         
+         plot_spear <- 
+           sample_spearman %>%
+           {.[, grep(paste0("^", tis_, "_"), colnames(sample_spearman), value = T)]} %>%
+           set_colnames(str_extract(colnames(.), ".$")) %>%
+           pheatmap(annotation_row = sample_pearson_meta,
+                    annotation_colors = list(Organ = tissue_colors_palette_organs),
+                    annotation_legend = F,
+                    clustering_method = "ward.D2",
+                    main = "spearman Ward 2",
+                    border_color = NA, 
+                    fontsize_row = 4,
+                    silent = T, 
+                    color = heatmap_palette,
+                    legend = T)
+         
+         # plot(plot_spear[[4]])
+         plot_spear[[4]]
+         
+       })
+
+```
+
+
+
+```{r correlation_PCA_clustering, eval = F, echo = F, warning = F, message = F, results=F, fig.height=20, fig.width=10}
+
+dendr <- dendro_data(sample_PCA_spearman_clust)
+
+
+dendro_plot_data <- 
+  left_join(dendr$segments, 
+            dendr$labels, 
+            by = c("x" = "x", "yend" = "y")) %>% 
+  separate(col = label, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = c("tissue"))
+
+plot_PCA_spearman_dendrogram <- 
+  dendro_plot_data %>%
+  ggplot() +
+  geom_segment(aes(x=y, y=x, xend=yend, yend=xend, group = tissue))+
+  geom_text(data = ggdendro::label(dendr) %>%
+              as_tibble() %>%
+              separate(col = label, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+              left_join(tissue_mapping, by = "tissue"),
+            aes(label=individual,
+                x=0,
+                y=x,
+                color = label),
+            size = 3,
+            hjust = 0,
+            show.legend = F)+
+  geom_text(data = ggdendro::label(dendr) %>%
+              as_tibble() %>%
+              separate(col = label, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+              left_join(tissue_mapping, by = "tissue"),
+            aes(label=tissue_name,
+                x=0,
+                y=x,
+                color = tissue_name),
+            size = 3,
+            hjust = 0,
+            nudge_x = 0.02,
+            show.legend = F)+
+  # scale_y_continuous(limits = c(-0.25, 1.25),
+  #                    breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25))+
+  scale_color_manual(values = c(sample_color, tissue_colors_palette))+
+  scale_x_reverse(expand = c(0, 0.1))+
+  # scale_x_continuous(expand = c(0, 0.1))+
+  # theme_void()+
+  theme(axis.text.y = element_blank(), 
+        axis.title = element_blank(), 
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(1,1,1,1), units = "mm"), 
+        panel.background = element_blank()) 
+plot_PCA_spearman_dendrogram
+ggsave("Figures/PCA spearman dendrogram.pdf", plot = plot_PCA_spearman_dendrogram, height = 20, width = 12, useDingbats = F)
+
+
+plots_PCA_spearman_dendrogram_zoom <- 
+  lapply(tissues_in_data,
+       FUN = function(tis_) {
+         plot_PCA_spearman_dendrogram + 
+           facet_zoom(xy = tissue == tis_) + 
+           geom_segment(data = dendro_plot_data %>% 
+                          filter(tissue == tis_),
+                        aes(x=-y, y=x, xend=-yend, yend=xend, group = tissue),
+                        size = 3, 
+                        color = "red",
+                        alpha = 0.5)
+       })
+
+```
+
+Below is an alternative (and complementary) clustering of tissues using Ward clustering of PCA scores in the 92 selected components. This type of clustering is based on minimizing the variance within each cluster and thus takes distances into account, which correlation does not. 
+
+```{r PCA_level_clustering, echo = F, warning = F, message = F, results=F, fig.height=20, fig.width=10}
+
+sample_PCA_level_clust <- 
+  scores(pig_pca)[,1:informative_comps2] %>%
+  dist() %>%
+  hclust(method = "ward.D2") 
+
+dendr <- 
+  sample_PCA_level_clust %>%
+  dendro_data()
+
+dendro_plot_data <- 
+  left_join(dendr$segments, 
+            dendr$labels, 
+            by = c("x" = "x", "yend" = "y")) %>% 
+  separate(col = label, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = c("tissue"))
+
+plot_PCA_dist_dendrogram <- 
+  dendro_plot_data %>%
+  ggplot() +
+  geom_segment(aes(x=y, y=x, xend=yend, yend=xend, group = tissue))+
+  geom_text(data = ggdendro::label(dendr) %>%
+              as_tibble() %>%
+              separate(col = label, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+              left_join(tissue_mapping, by = "tissue"),
+            aes(label=individual,
+                x=0,
+                y=x,
+                color = label),
+            size = 3,
+            hjust = 0,
+            show.legend = F)+
+  geom_text(data = ggdendro::label(dendr) %>%
+              as_tibble() %>%
+              separate(col = label, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+              left_join(tissue_mapping, by = "tissue"),
+            aes(label=tissue_name,
+                x=0,
+                y=x,
+                color = tissue_name),
+            size = 3,
+            hjust = 0,
+            nudge_x = 5,
+            show.legend = F)+
+  # scale_y_continuous(limits = c(-0.25, 1.25),
+  #                    breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25))+
+  scale_color_manual(values = c(sample_color, tissue_colors_palette))+
+  scale_x_reverse(expand = c(0.3, 0))+
+  # scale_x_continuous(expand = c(0.15, 0))+
+  # scale_x_continuous(expand = c(0, 0.1))+
+  # theme_void()+
+  theme(axis.text.y = element_blank(), 
+        axis.title = element_blank(), 
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(1,1,1,1), units = "mm"), 
+        panel.background = element_blank()) 
+
+plot_PCA_dist_dendrogram
+ggsave("Figures/PCA dist informative PCs dendrogram.pdf", plot = plot_PCA_dist_dendrogram, height = 20, width = 12, useDingbats = F)
+
+
+plots_PCA_dist_dendrogram_zoom <-
+  lapply(tissues_in_data,
+       FUN = function(tis_) {
+         plot_PCA_dist_dendrogram +
+           facet_zoom(xy = tissue == tis_) +
+           scale_x_reverse(expand = c(0.4, 0))+
+           geom_segment(data = dendro_plot_data %>%
+                          filter(tissue == tis_),
+                        aes(x=y, y=x, xend=yend, yend=xend, group = tissue),
+                        size = 3,
+                        color = "red",
+                        alpha = 0.5)
+       })
+
+```
+
+```{r investigate_distance_PCA_comps, eval = F, echo = F, warning = F, message = F, results=F, fig.height=20, fig.width=10}
+
+A <- 
+  lapply(1:50,
+         FUN = function(npc) {
+           scores(pig_pca)[,1:npc] %>%
+             dist() %>%
+             as.matrix() %>%
+             as_tibble(rownames = "sample_1") %>%
+             gather("sample_2", "distance", -1) %>%
+             filter(sample_1 != sample_2) %>%
+             separate(sample_1, into = c("tissue_1", "individual_1"), sep = "_", remove = F) %>%
+             separate(sample_2, into = c("tissue_2", "individual_2"), sep = "_", remove = F) %>%
+             filter(tissue_1 == tissue_2) %>%
+             group_by(sample = sample_1, tissue = tissue_1) %>%
+             summarise(mean_distance = mean(distance))
+         }) %>%
+  set_names(1:50) %>%
+  plyr::ldply(.id = "npc") %>%
+  as_tibble() %>%
+  mutate(npc = as.numeric(npc))
+
+A %>%
+  
+  filter(tissue %in% c("adiB", "adr", "spl", "pan")) %>%
+  ggplot(aes(npc, (mean_distance^2)/npc, color = tissue, group = sample)) + 
+  geom_line(alpha = 0.5) + 
+  simple_theme + 
+  scale_y_log10() +
+  scale_color_manual(values = tissue_abbrev_colors_palette)
+
+
+####
+
+B <- 
+  lapply(1:50,
+         FUN = function(npc) {
+           scores(pig_pca)[,npc] %>%
+             dist() %>%
+             as.matrix() %>%
+             as_tibble(rownames = "sample_1") %>%
+             gather("sample_2", "distance", -1) %>%
+             filter(sample_1 != sample_2) %>%
+             separate(sample_1, into = c("tissue_1", "individual_1"), sep = "_", remove = F) %>%
+             separate(sample_2, into = c("tissue_2", "individual_2"), sep = "_", remove = F) %>%
+             filter(tissue_1 == tissue_2) %>%
+             group_by(sample = sample_1, tissue = tissue_1) %>%
+             summarise(mean_distance = mean(distance))
+         }) %>%
+  set_names(1:50) %>%
+  plyr::ldply(.id = "npc") %>%
+  as_tibble() %>%
+  mutate(npc = as.numeric(npc))
+
+B %>%
+  
+  filter(tissue %in% c("adiB", "adr", "spl", "pan")) %>%
+  ggplot(aes(npc, mean_distance, color = tissue, group = sample)) + 
+  geom_line(alpha = 0.5) + 
+  simple_theme + 
+  scale_y_log10() +
+  scale_color_manual(values = tissue_abbrev_colors_palette)
+
+```
+
+
+Heatmap displaying the clustering as well as the spearman correlation of individual is available in the file "Spearman heatmap dist clust.pdf".
+
+```{r correlation_3, echo = F, warning = F, message = F, results=F, fig.height=10, fig.width=10}
+
+sample_spearman_meta <-
+  tibble(sample_ID = rownames(sample_spearman)) %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_") %>% 
+  left_join(tissue_colors, 
+            by = "tissue") %>% 
+  unite(col = "sample_ID", tissue, individual, sep = "_") %>%
+  select(1, 
+         # Tissue = tissue_name,
+         # `Tissue group` = tissue_group, 
+         Organ = organ_name) %>%
+  column_to_rownames("sample_ID")
+  
+
+# Heatmap on spearman of scaled data - cluster on spearman of scaled data
+sample_spearman %>% 
+  pheatmap(color = heatmap_palette,
+           cluster_cols = sample_spearman_clust,
+           cluster_rows = sample_spearman_clust, 
+           annotation_row = sample_spearman_meta,
+           annotation_colors = list(Organ = tissue_colors_palette_organs),
+           border_color = NA, 
+           # show_colnames = F,
+           # show_rownames = F,
+           filename = "Figures/Spearman heatmap dist clust.pdf", 
+           useDingbats = F,
+           height = 12, width = 16)
+
+# Heatmap on spearman of scaled data - cluster on level of PCA with selected components
+sample_spearman %>% 
+  pheatmap(color = heatmap_palette,
+           cluster_cols = sample_PCA_level_clust,
+           cluster_rows = sample_PCA_level_clust, 
+           annotation_row = sample_spearman_meta,
+           annotation_colors = list(Organ = tissue_colors_palette_organs),
+           border_color = NA,
+           filename = "Figures/Spearman heatmap PCA level clust.pdf", 
+           useDingbats = F,
+           height = 12, width = 16)
+
+
+
+
+```
+
+
+```{r correlation_4, eval = F, echo = F, warning = F, message = F, results=F, fig.height=10, fig.width=10}
+# Calculate spearman correlation:
+
+
+gene_pearson_data_ <- 
+  gene_pearson_data %>%
+  # Keep only genes that are expressed in all samples:
+  {.[,gene_metrics$frac_non_zero == 1]} 
+
+gene_pearson <- 
+  gene_pearson_data_ %>%
+  cor(method = "pearson")
+
+gene_pearson_ext <-
+  gene_pearson_data_ %>%
+  rcorr(type = "pearson")
+
+# Create euclidean distance cluster:
+gene_pearson_clust <- 
+  gene_pearson %>%
+  {1 - .} %>%
+  as.dist() %>%
+  hclust("average")
+
+
+
+gene_pearson %>%
+  pheatmap(cluster_cols = gene_pearson_clust,
+           cluster_rows = gene_pearson_clust, 
+           show_rownames = F,
+           show_colnames = F,
+           border_color = NA)
+
+
+gene_pearson_p_values <- 
+  gene_pearson_ext$P %>% {
+    m <- .
+    m[lower.tri(m)] <- NA
+    m
+  } %>% 
+  as_tibble(rownames = "gene1") %>%
+  gather(key = "gene2", value = "pval", -1) %>%
+  filter(!is.na(pval)) %>%
+  mutate(adj_pval = p.adjust(pval, method = "BH")) %>%
+  {rbind(., 
+         tibble(gene1 = .$gene2,
+                gene2 = .$gene1,
+                pval = .$pval, 
+                adj_pval = .$adj_pval))}
+
+gene_pearson_modules <- 
+  cutree(gene_pearson_clust, h = 0.1) %>%
+  enframe("gene", "gene_module")
+
+gene_large_modules <- 
+  table(gene_pearson_modules$gene_module) %>%
+  enframe("module", "n") %>%
+  arrange(-n) %>%
+  filter(n >= 5)
+  
+genes_in_large_modules <- 
+  gene_pearson_modules %>% 
+  filter(gene_module %in% gene_large_modules$module) %$%
+  gene
+
+gene_pearson_big_modules <- 
+  left_join(gene_pearson_ext$r %>%
+              {.[genes_in_large_modules,genes_in_large_modules]} %>%
+              as_tibble(rownames = "gene1") %>%
+              gather(key = "gene2", value = "correlation", -1),
+            gene_pearson_p_values %>%
+              filter(gene1 %in% genes_in_large_modules & gene2 %in% genes_in_large_modules),
+            by = c("gene1", "gene2")) %>%
+  left_join(gene_pearson_modules,
+            by = c("gene1" = "gene")) %>%
+  left_join(gene_pearson_modules,
+            by = c("gene2" = "gene"),
+            suffix = c("1", "2")) 
+
+
+
+gene_pearson_big_modules %>%
+  select(1:3) %>%
+  spread(key = gene2, value = correlation) %>%
+  column_to_rownames("gene1") %>%
+  as.matrix() %>%
+  pheatmap(show_rownames = F,
+           show_colnames = F,
+           border_color = NA)
+
+
+
+```
+
+
+Below we see three plots showing the twodimensional projections of the data using three different strategies:
+1. PCA
+
+```{r PCA, echo = F, warning = F, message = F, results=F, fig.height=10, fig.width=10}
+# PCA
+# pca <- 
+#   wide_tpm_pig_data %>%
+#   {log10(. + 1)} %>%
+#   t() %>%
+#   pca(nPcs = 3)
+
+# pca_loadings <- loadings(pca)  
+pca_scores <- 
+  scores(pig_pca)[,1:informative_comps2] %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+pca_plot_data <- 
+  pca_scores %>%
+  group_by(tissue_name) %>%
+  mutate(mean_PC1 = mean(PC1),
+         mean_PC2 = mean(PC2)) %>%
+  ungroup()
+
+pca_plot <- 
+  pca_plot_data %>%
+  ggplot(aes(PC1, PC2, color = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme + 
+  geom_segment(aes(xend = mean_PC1, yend = mean_PC2),
+               show.legend = F) + 
+  geom_text(data = select(pca_plot_data, tissue_name, mean_PC1, mean_PC2) %>%
+              unique(),
+            aes(x = mean_PC1, y = mean_PC2, label = tissue_name),
+            show.legend = F)
+
+pca_plot
+
+ggsave("Figures/PCA plot big.pdf", plot = pca_plot, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/PCA plot.pdf", plot = pca_plot, height = 8, width = 8, useDingbats = F)
+```
+
+```{r PCA2, echo = F, warning = F, message = F, results=F, fig.height=10, fig.width=10}
+pca_plot <- 
+  pca_plot_data %>%
+  ggplot(aes(PC1, PC3, color = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme + 
+  geom_segment(aes(xend = mean_PC1, yend = mean_PC2),
+               show.legend = F) + 
+  geom_text(data = select(pca_plot_data, tissue_name, mean_PC1, mean_PC2) %>%
+              unique(),
+            aes(x = mean_PC1, y = mean_PC2, label = tissue_name),
+            show.legend = F,
+            size = 5)
+
+pca_zoom_plots <- 
+  lapply(unique(pca_plot_data$tissue_name),
+         FUN = function(tis_) {
+           p <-
+             pca_plot + 
+             facet_zoom(xy = tissue_name == tis_, horizontal = F)+
+             ggtitle(tis_) + 
+             geom_label(aes(label = individual, fill = tissue_name), show.legend = F, color = "black") + 
+             scale_fill_manual(values = tissue_colors_palette) + 
+             geom_segment(data = pca_plot_data %>% 
+                            filter(tissue_name == tis_),
+                          aes(xend = mean_PC1, yend = mean_PC2),
+                          alpha = 0.5, 
+                          size = 4,
+                          show.legend = F) 
+           
+           
+           pb <- ggplot_build(p)
+           pb$data[[3]][which(pb$data[[3]]$PANEL == 1), 'alpha'] <- 0
+           pb$data[[4]][which(pb$data[[3]]$PANEL != 6), 'alpha'] <- 0
+           pb$data[[4]][which(pb$data[[3]]$PANEL != 6), 'colour'] <- NA
+           pg <- ggplot_gtable(pb)
+           # plot(pg)
+           pg
+         })
+
+# lapply(pca_zoom_plots, plot)
+```
+
+```{r PCA_on_PCA_test, eval = F, echo = F, warning = F, message = F, results=F}
+# PCA
+pca <- 
+  scores(pig_pca)[,1:20] %>%
+  # t() %>%
+  pca(nPcs = 3)
+
+pca_loadings <- loadings(pca)  
+pca_on_pca_scores <- 
+  scores(pca) %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+pca_on_pca_plot_data <- 
+  pca_on_pca_scores %>%
+  group_by(tissue_name) %>%
+  mutate(mean_PC1 = mean(PC1),
+         mean_PC2 = mean(PC2)) %>%
+  ungroup()
+
+pca_on_pca_plot <- 
+  pca_on_pca_plot_data %>%
+  ggplot(aes(PC1, PC2, color = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme + 
+  geom_segment(aes(xend = mean_PC1, yend = mean_PC2),
+               show.legend = F) + 
+  geom_text(data = select(pca_on_pca_plot_data, tissue_name, mean_PC1, mean_PC2) %>%
+              unique(),
+            aes(x = mean_PC1, y = mean_PC2, label = tissue_name),
+            show.legend = F)
+
+pca_on_pca_plot
+
+# ggsave("PCA plot big.pdf", plot = pca_plot, height = 40, width = 40)
+
+```
+
+```{r PCA_UMAP_batch_test, eval = F, include = F}
+
+pca_scores_batch <- 
+  scores(pig_pca)[,1:informative_comps2] %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue") %>% 
+  mutate(brain_batch = tissue %in% unique(gsub("^\\d-", "", unique(brain_data$sample))))
+
+pca_plot_data_batch <- 
+  pca_scores_batch %>%
+  group_by(tissue_name) %>%
+  mutate(mean_PC1 = mean(PC1),
+         mean_PC2 = mean(PC2)) %>%
+  ungroup()
+
+pca_plot_batch <- 
+  pca_plot_data_batch %>%
+  ggplot(aes(PC1, PC2, color = brain_batch)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = c(tissue_colors_palette, "TRUE" = "red", "FALSE" = "blue")) +
+  simple_theme + 
+  geom_segment(aes(xend = mean_PC1, yend = mean_PC2),
+               show.legend = F) + 
+  geom_text(data = select(pca_plot_data_batch, tissue_name, mean_PC1, mean_PC2) %>%
+              unique(),
+            aes(x = mean_PC1, y = mean_PC2, label = tissue_name, color = tissue_name),
+            show.legend = F)
+
+pca_plot_batch
+
+ggsave("Figures/PCA all genes batch test.pdf", plot = pca_plot_batch, height = 8, width = 8)
+
+# sElected genes
+
+selected_genes_batch <- 
+  pig_pca_data[,c("ENSSSCG00000000694", "ENSSSCG00000013391")]%>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue") %>% 
+  mutate(brain_batch = tissue %in% unique(gsub("^\\d-", "", unique(brain_data$sample))))
+
+selected_genes_plot_data_batch <- 
+  selected_genes_batch %>%
+  group_by(tissue_name) %>%
+  mutate(mean_gene1 = mean(ENSSSCG00000000694),
+         mean_gene2 = mean(ENSSSCG00000013391)) %>%
+  ungroup()
+
+selected_genes_plot_batch <- 
+  selected_genes_plot_data_batch %>%
+  ggplot(aes(ENSSSCG00000000694, ENSSSCG00000013391, color = brain_batch)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = c(tissue_colors_palette, "TRUE" = "red", "FALSE" = "blue")) +
+  simple_theme + 
+  geom_segment(aes(xend = mean_gene1, yend = mean_gene2),
+               show.legend = F) + 
+  geom_text(data = select(selected_genes_plot_data_batch, tissue_name, mean_gene1, mean_gene2) %>%
+              unique(),
+            aes(x = mean_gene1, y = mean_gene2, label = tissue_name, color = tissue_name),
+            show.legend = F)
+
+selected_genes_plot_batch
+
+
+# pca loadings
+
+loadings(pig_pca) %>% 
+  as_tibble(rownames = "enssscg_id") %>% 
+  select(1:3) %>% 
+  arrange(-abs(PC1)) %>% 
+  head(12000) %>% 
+  ggplot(aes(PC1, PC2)) + 
+  geom_hex(aes(fill = stat(log(count))),
+           bins = 100) + 
+  scale_fill_viridis_c() +
+  simple_theme
+
+
+# PCA gene orthologs expressed in all - low tissue specificity
+genes_expall_lowspec <- 
+  protein_atlas %>% 
+  filter(distribution == "Detected in all" & 
+           specificity == "Low tissue specificity") %>% 
+  inner_join(gene_orthologs) %$%
+  unique(enssscg_id)
+
+pig_pca_lowspec <- 
+  pig_pca_data %>% 
+  {.[,genes_expall_lowspec]} %>% 
+  pca(nPcs = 4, scale = "none", center = F)
+
+pca_scores_batch <- 
+  scores(pig_pca_lowspec) %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue") %>% 
+  mutate(brain_batch = tissue %in% unique(gsub("^\\d-", "", unique(brain_data$sample))))
+
+pca_plot_data_batch <- 
+  pca_scores_batch %>%
+  group_by(tissue_name) %>%
+  mutate(mean_PC1 = mean(PC2),
+         mean_PC2 = mean(PC3)) %>%
+  ungroup()
+
+pca_plot_batch <- 
+  pca_plot_data_batch %>%
+  ggplot(aes(PC2, PC3, color = brain_batch)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = c(tissue_colors_palette, "TRUE" = "red", "FALSE" = "blue")) +
+  simple_theme + 
+  geom_segment(aes(xend = mean_PC1, yend = mean_PC2),
+               show.legend = F) + 
+  geom_text(data = select(pca_plot_data_batch, tissue_name, mean_PC1, mean_PC2) %>%
+              unique(),
+            aes(x = mean_PC1, y = mean_PC2, label = tissue_name, color = tissue_name),
+            show.legend = F)
+
+pca_plot_batch
+
+ggsave("Figures/PCA unspecific orthologs batch test.pdf", plot = pca_plot_batch, height = 8, width = 8)
+
+grid.arrange(loadings(pig_pca_lowspec) %>%
+               as_tibble(rownames = "enssscg_id") %$% 
+               density(PC2, n = 4096) %$% 
+               tibble(x, y) %>%
+               ggplot(aes(x, y)) + 
+               
+               geom_segment(aes(xend = x, yend = 0),
+                            show.legend = F, 
+                            size = 1, 
+                            color = "#414D6BFF")+
+               geom_line(show.legend = F, 
+                         color = "#414D6BFF") +
+               # scale_color_viridis_c() +
+               theme_void(),
+             loadings(pig_pca_lowspec) %>% 
+               as_tibble(rownames = "enssscg_id") %>% 
+               select(1:4) %>% 
+               arrange(-abs(PC2)) %>% 
+               # head(6000) %>% 
+               ggplot(aes(PC2, PC3)) + 
+               geom_hex(bins = 100, show.legend = F) + 
+               scale_fill_viridis_c() +
+               simple_theme, 
+             heights = c(0.3, 1))
+
+loadings(pig_pca_lowspec)
+
+# PC2_pulling_genes <- 
+#   loadings(pig_pca_lowspec)[,2, drop = F] %>% 
+#   as_tibble(rownames = "enssscg_id") %>% 
+#   arrange(-abs(PC2)) %>% 
+#   filter(abs(PC2) > 0.01) %$%
+#   enssscg_id
+
+PC2_transformed_data <- 
+  t(scores(pig_pca_lowspec)[,2, drop = F] %*% 
+                 t(loadings(pig_pca_lowspec)[,2, drop = F])) %>%
+  as_tibble(rownames = "enssscg_id") %>%
+  gather("sample_ID", "expression", -1) %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  mutate(brain_batch = tissue %in% unique(gsub("^\\d-", "", unique(brain_data$sample))))
+
+
+
+PC2_transformed_data_joined <- 
+  PC2_transformed_data %>%
+  left_join(pig_data_norm, 
+            by = c("enssscg_id", "individual", "tissue" = "tissue_ID"))
+
+PC2_transformed_data_joined %>% 
+  filter(enssscg_id == sample(enssscg_id, 1)) %>%
+  mutate(sample_ID = factor(sample_ID, levels = unique(sample_ID[order(brain_batch)]))) %>%
+  {grid.arrange(ggplot(., aes(sample_ID, tmm, fill = brain_batch)) + 
+                  geom_col() + 
+                  geom_hline(data = group_by(., brain_batch) %>%
+                               summarise(mean = mean(tmm)),
+                             aes(yintercept = mean, color = brain_batch))+
+                  simple_theme + 
+                  theme(axis.text.x = element_blank()),
+                ggplot(., aes(sample_ID, expression, fill = brain_batch)) + 
+                  geom_col() + 
+                  geom_hline(data = group_by(., brain_batch) %>%
+                               summarise(mean = mean(expression)),
+                             aes(yintercept = mean, color = brain_batch))+
+                  simple_theme + 
+                  theme(axis.text.x = element_blank()))}
+
+PC2_transformed_data_joined %>%
+  group_by(enssscg_id) %>% 
+  summarise(diff_exp = mean(expression[brain_batch]) - mean(expression[!brain_batch]),
+            diff_tmm = mean(tmm[brain_batch]) - mean(tmm[!brain_batch])) %>%
+  ggplot(aes(diff_exp, diff_tmm)) + 
+  geom_hex(bins = 100) + 
+  scale_y_log10() +
+  scale_x_log10() +
+  scale_fill_viridis_c() + 
+  simple_theme
+
+PC2_transformed_data_joined %>%
+  ggplot(aes(expression, tmm)) + 
+  geom_hex(bins = 100) + 
+  scale_y_log10() +
+  # scale_x_log10() +
+  scale_fill_viridis_c() + 
+  simple_theme
+
+PC2_transformed_data_joined_diffsum <- 
+  PC2_transformed_data_joined %>%
+  group_by(enssscg_id) %>% 
+  summarise(diff_exp = median(expression[brain_batch]) - median(expression[!brain_batch]),
+            diff_exp_perc = diff_exp / sd(expression),
+            diff_tmm = median(tmm[brain_batch]) - median(tmm[!brain_batch]),
+            diff_tmm_perc = diff_tmm / median(tmm)) 
+  
+PC2_transformed_data_joined_diffsum %>%
+  ggplot(aes(diff_tmm_perc))+ 
+  geom_density() + 
+  simple_theme
+
+top_diff_batch_genes <- 
+  PC2_transformed_data_joined_diffsum %>%
+  arrange(-abs(diff_tmm_perc)) %>%
+  top_n(20, diff_tmm_perc) %$%
+  enssscg_id
+
+top_diff_plots <- 
+  lapply(top_diff_batch_genes,
+       FUN = function(gene_) {
+         PC2_transformed_data_joined %>% 
+           filter(enssscg_id == gene_) %>%
+           mutate(sample_ID = factor(sample_ID, levels = unique(sample_ID[order(brain_batch)]))) %>%
+           select(sample_ID, expression, tmm, brain_batch) %>%
+           gather("type", "value", expression, tmm) %>%
+           {ggplot(., aes(sample_ID, value, fill = brain_batch)) + 
+               geom_col() + 
+               geom_hline(data = group_by(., brain_batch, type) %>%
+                            summarise(median = median(value)),
+                          aes(yintercept = median, color = brain_batch))+
+               simple_theme + 
+               facet_wrap(~type, scales = "free_y", ncol = 1, )+
+               theme(axis.text.x = element_blank())}
+         
+       })
+i <- 1
+
+top_diff_plots[i]
+i <- i + 1
+
+
+# PCA PC2 corrected data 
+
+
+pig_pca_lowspec <- 
+  PC2_transformed_data_joined %>% 
+  mutate(tmm2 = tmm - expression) %>% 
+  select(enssscg_id, sample_ID, tmm2) %>% 
+  spread(enssscg_id, tmm2) %>% 
+  column_to_rownames("sample_ID") %>% 
+  pca(nPcs = 4, scale = "none", center = F)
+
+pca_scores_batch <- 
+  scores(pig_pca_lowspec) %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue") %>% 
+  mutate(brain_batch = tissue %in% unique(gsub("^\\d-", "", unique(brain_data$sample))))
+
+pca_plot_data_batch <- 
+  pca_scores_batch %>%
+  group_by(tissue_name) %>%
+  mutate(mean_PC1 = mean(PC2),
+         mean_PC2 = mean(PC3)) %>%
+  ungroup()
+
+pca_plot_batch <- 
+  pca_plot_data_batch %>%
+  ggplot(aes(PC2, PC3, color = brain_batch)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = c(tissue_colors_palette, "TRUE" = "red", "FALSE" = "blue")) +
+  simple_theme + 
+  geom_segment(aes(xend = mean_PC1, yend = mean_PC2),
+               show.legend = F) + 
+  geom_text(data = select(pca_plot_data_batch, tissue_name, mean_PC1, mean_PC2) %>%
+              unique(),
+            aes(x = mean_PC1, y = mean_PC2, label = tissue_name, color = tissue_name),
+            show.legend = F)
+
+pca_plot_batch
+
+# ggsave("Figures/PCA unspecific orthologs batch test.pdf", plot = pca_plot_batch, height = 10, width = 10)
+
+set.seed(42)
+
+umap_res_batch <- 
+  PC2_transformed_data_joined %>% 
+  mutate(tmm2 = tmm - expression) %>% 
+  select(enssscg_id, sample_ID, tmm2) %>% 
+  spread(enssscg_id, tmm2) %>% 
+  column_to_rownames("sample_ID") %>% 
+  umap(n_components = 2,
+       n_epochs = 200)
+
+umap_scores_batch <- 
+  umap_res_batch$layout %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue") %>% 
+  mutate(brain_batch = tissue %in% unique(gsub("^\\d-", "", unique(brain_data$sample))))
+
+umap_plot_data_batch <- 
+  umap_scores_batch %>%
+  group_by(tissue_name) %>%
+  mutate(mean_V1 = mean(V1),
+         mean_V2 = mean(V2)) %>%
+  ungroup()
+
+umap_plot_batch <- 
+  umap_plot_data_batch %>%
+  ggplot(aes(V1, V2, color = brain_batch)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = c(tissue_colors_palette, "TRUE" = "red", "FALSE" = "blue")) +
+  simple_theme + 
+  geom_segment(aes(xend = mean_V1, yend = mean_V2),
+               show.legend = F) + 
+  geom_text(data = select(umap_plot_data_batch, tissue_name, mean_V1, mean_V2) %>%
+              unique(),
+            aes(x = mean_V1, y = mean_V2, label = tissue_name, color = tissue_name),
+            show.legend = F)
+
+umap_plot_batch
+
+# ggsave("Figures/UMAP unspecific orthologs batch test.pdf", plot = umap_plot_batch, height = 10, width = 10)
+
+# umap unspecific orthologs
+
+set.seed(42)
+
+umap_res_batch <- 
+  pig_pca_data %>%
+  {.[,genes_expall_lowspec]} %>% 
+  umap(n_components = 2,
+       n_epochs = 200)
+
+umap_scores_batch <- 
+  umap_res_batch$layout %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue") %>% 
+  mutate(brain_batch = tissue %in% unique(gsub("^\\d-", "", unique(brain_data$sample))))
+
+umap_plot_data_batch <- 
+  umap_scores_batch %>%
+  group_by(tissue_name) %>%
+  mutate(mean_V1 = mean(V1),
+         mean_V2 = mean(V2)) %>%
+  ungroup()
+
+umap_plot_batch <- 
+  umap_plot_data_batch %>%
+  ggplot(aes(V1, V2, color = brain_batch)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = c(tissue_colors_palette, "TRUE" = "red", "FALSE" = "blue")) +
+  simple_theme + 
+  geom_segment(aes(xend = mean_V1, yend = mean_V2),
+               show.legend = F) + 
+  geom_text(data = select(umap_plot_data_batch, tissue_name, mean_V1, mean_V2) %>%
+              unique(),
+            aes(x = mean_V1, y = mean_V2, label = tissue_name, color = tissue_name),
+            show.legend = F)
+
+umap_plot_batch
+
+ggsave("Figures/UMAP unspecific orthologs batch test.pdf", plot = umap_plot_batch, height = 8, width = 8)
+
+# umap
+
+set.seed(42)
+
+umap_res_batch <- 
+  pig_pca_data %>%
+  umap(n_components = 2,
+       n_epochs = 1000)
+
+umap_scores_batch <- 
+  umap_res_batch$layout %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue") %>% 
+  mutate(brain_batch = tissue %in% unique(gsub("^\\d-", "", unique(brain_data$sample))))
+
+umap_plot_data_batch <- 
+  umap_scores_batch %>%
+  group_by(tissue_name) %>%
+  mutate(mean_V1 = mean(V1),
+         mean_V2 = mean(V2)) %>%
+  ungroup()
+
+umap_plot_batch <- 
+  umap_plot_data_batch %>%
+  ggplot(aes(V1, V2, color = brain_batch)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = c(tissue_colors_palette, "TRUE" = "red", "FALSE" = "blue")) +
+  simple_theme + 
+  geom_segment(aes(xend = mean_V1, yend = mean_V2),
+               show.legend = F) + 
+  geom_text(data = select(umap_plot_data_batch, tissue_name, mean_V1, mean_V2) %>%
+              unique(),
+            aes(x = mean_V1, y = mean_V2, label = tissue_name, color = tissue_name),
+            show.legend = F)
+
+umap_plot_batch
+
+ggsave("Figures/UMAP all genes batch test.pdf", plot = umap_plot_batch, height = 8, width = 8)
+
+```
+
+```{r Batch_gene_effect_GLM, eval = F, include=F}
+brain_tissues <- 
+  unique(gsub("^\\d-", "", unique(brain_data$sample)))
+
+glm_data <- 
+  pig_data_norm %>% 
+  left_join(sample_meta, 
+            by = "individual") %>% 
+  mutate(batch = case_when(tissue_ID %in% brain_tissues ~ "brain",
+                           T ~ "tissue"))
+
+unique(glm_data$enssscg_id)
+
+glm_data %>% 
+  filter(enssscg_id == sample(enssscg_id, 1)) %>%
+  {glm(tmm ~ tissue_ID + individual + sex + batch, data = .)}
+
+```
+
+
+\pagebreak
+
+2. UMAP
+
+```{r UMAP1, echo = F, warning = F, message = F, results=F, fig.height=10, fig.width=10}
+# UMAP
+
+set.seed(42)
+
+umap_res <- 
+  pig_pca_data %>%
+  umap(n_components = 2,
+       n_epochs = 1000)
+
+umap_scores <- 
+  umap_res$layout %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+umap_plot_data <- 
+  umap_scores %>%
+  group_by(tissue_name) %>%
+  mutate(mean_V1 = mean(V1),
+         mean_V2 = mean(V2)) %>%
+  ungroup()
+
+umap_plot <- 
+  umap_plot_data %>%
+  ggplot(aes(V1, V2, color = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme + 
+  geom_segment(aes(xend = mean_V1, yend = mean_V2),
+               show.legend = F) + 
+  geom_text(data = select(umap_plot_data, tissue_name, mean_V1, mean_V2) %>%
+              unique(),
+            aes(x = mean_V1, y = mean_V2, label = tissue_name),
+            show.legend = F)
+
+umap_plot
+
+umap_plot_samples <- umap_plot
+
+ggsave("Figures/UMAP plot big.pdf", plot = umap_plot, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/UMAP plot.pdf", plot = umap_plot, height = 8, width = 8, useDingbats = F)
+
+umap1_zoom_plots <- 
+  lapply(tissues_in_data,
+         FUN = function(tis_) {
+           tissue_ <- tissue_mapping$tissue_name[which(tissue_mapping$tissue == tis_)]
+           
+           p <-
+             umap_plot + 
+             facet_zoom(xy = tissue_name == tissue_, horizontal = F)+
+             ggtitle(tissue_) + 
+             geom_label(aes(label = individual, fill = tissue_name), show.legend = F, color = "black") + 
+             scale_fill_manual(values = tissue_colors_palette) + 
+             geom_segment(data = umap_plot_data %>% 
+                            filter(tissue_name == tissue_),
+                          aes(xend = mean_V1, yend = mean_V2),
+                          alpha = 0.5, 
+                          size = 4,
+                          show.legend = F) 
+           
+           
+           pb <- ggplot_build(p)
+           pb$data[[3]][which(pb$data[[3]]$PANEL == 1), 'alpha'] <- 0
+           pb$data[[4]][which(pb$data[[3]]$PANEL != 6), 'alpha'] <- 0
+           pb$data[[4]][which(pb$data[[3]]$PANEL != 6), 'colour'] <- NA
+           pg <- ggplot_gtable(pb)
+           # plot(pg)
+           pg
+         })
+
+
+```
+
+
+\pagebreak
+
+3. UMAP on 92 PCs
+
+```{r UMAP1_PCA, echo = F, warning = F, message = F, results=F, fig.height=10, fig.width=10}
+# UMAP
+
+set.seed(42)
+
+umap_res <- 
+  scores(pig_pca)[,1:informative_comps2] %>%
+  umap(n_components = 2,
+       n_epochs = 1000)
+
+umap_scores <- 
+  umap_res$layout %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+umap_plot_data <- 
+  umap_scores %>%
+  group_by(tissue_name) %>%
+  mutate(mean_V1 = mean(V1),
+         mean_V2 = mean(V2)) %>%
+  ungroup()
+
+umap_plot <- 
+  umap_plot_data %>%
+  ggplot(aes(V1, V2, color = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme + 
+  geom_segment(aes(xend = mean_V1, yend = mean_V2),
+               show.legend = F) + 
+  geom_text(data = select(umap_plot_data, tissue_name, mean_V1, mean_V2) %>%
+              unique(),
+            aes(x = mean_V1, y = mean_V2, label = tissue_name),
+            show.legend = F)
+
+umap_plot
+
+ggsave("Figures/UMAP on PCA plot big.pdf", plot = umap_plot, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/UMAP on PCA plot.pdf", plot = umap_plot, height = 10, width = 10, useDingbats = F)
+
+```
+
+
+```{r UMAP_zoom, echo = F, warning = F, message = F, results=F, fig.height=10, fig.width=10}
+umap_plot <- 
+  umap_plot_data %>%
+  ggplot(aes(V1, V2, color = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme + 
+  geom_segment(aes(xend = mean_V1, yend = mean_V2),
+               show.legend = F) + 
+  geom_text(data = select(umap_plot_data, tissue_name, mean_V1, mean_V2) %>%
+              unique(),
+            aes(x = mean_V1, y = mean_V2, label = tissue_name),
+            show.legend = F, 
+            size = 5)
+
+umap_zoom_plots <- 
+  lapply(tissues_in_data,
+         FUN = function(tis_) {
+           tissue_ <- tissue_mapping$tissue_name[which(tissue_mapping$tissue == tis_)]
+           
+           p <-
+             umap_plot + 
+             facet_zoom(xy = tissue_name == tissue_, horizontal = F)+
+             ggtitle(tissue_) + 
+             geom_label(aes(label = individual, fill = tissue_name), show.legend = F, color = "black") + 
+             scale_fill_manual(values = tissue_colors_palette) + 
+             geom_segment(data = umap_plot_data %>% 
+                            filter(tissue_name == tissue_),
+                          aes(xend = mean_V1, yend = mean_V2),
+                          alpha = 0.5, 
+                          size = 4,
+                          show.legend = F) 
+           
+           
+           pb <- ggplot_build(p)
+           pb$data[[3]][which(pb$data[[3]]$PANEL == 1), 'alpha'] <- 0
+           pb$data[[4]][which(pb$data[[3]]$PANEL != 6), 'alpha'] <- 0
+           pb$data[[4]][which(pb$data[[3]]$PANEL != 6), 'colour'] <- NA
+           pg <- ggplot_gtable(pb)
+           # plot(pg)
+           pg
+         })
+
+# lapply(umap_zoom_plots, plot)
+```
+
+```{r QC_plot, echo = F, warning = F, message = F, results=F}
+
+# pdf("Figures/Sample QC summary plots.pdf", width = 16, height = 10, useDingbats = F)
+# sapply(1:length(tissues_in_data),
+#        FUN = function(i) {
+#          tis_ = tissues_in_data[i]
+#          grid.arrange(umap_zoom_plots[[i]],
+#                       plots_PCA_dist_dendrogram_zoom[[i]],
+#                       sample_mah %>%
+#                         ungroup() %>%
+#                         filter(tissue == tis_) %>%
+#                         select(individual, mahalanobis, mean_pearson) %>%
+#                         gather("metric", "value", 2:3) %>%
+#                         ggplot(aes(individual, value)) + 
+#                         geom_col() + 
+#                         simple_theme + 
+#                         facet_wrap(~metric, scales = "free") + 
+#                         theme(axis.title = element_blank()), 
+#                       plots_PC_correlation_only_spearman[[i]], 
+#                       layout_matrix =  rbind(c(1,1,1,2,2,4,4),
+#                                              c(1,1,1,2,2,4,4),
+#                                              c(1,1,1,2,2,4,4),
+#                                              c(1,1,1,2,2,4,4),
+#                                              c(1,1,1,3,3,4,4),
+#                                              c(1,1,1,3,3,4,4)))
+#          
+#        })
+# dev.off()
+# 
+# 
+# 
+# pdf("Figures/Sample QC summary plots 2.pdf", width = 16, height = 10, useDingbats = F)
+# sapply(1:length(tissues_in_data),
+#        FUN = function(i) {
+#          tis_ = tissues_in_data[i]
+#          grid.arrange(umap_zoom_plots[[i]],
+#                       plots_spearman_dendrogram_zoom[[i]],
+#                       sample_mah %>%
+#                         ungroup() %>%
+#                         filter(tissue == tis_) %>%
+#                         select(individual, mahalanobis, mean_pearson) %>%
+#                         gather("metric", "value", 2:3) %>%
+#                         ggplot(aes(individual, value)) + 
+#                         geom_col() + 
+#                         simple_theme + 
+#                         facet_wrap(~metric, scales = "free") + 
+#                         theme(axis.title = element_blank()), 
+#                       plots_correlation_only_spearman[[i]], 
+#                       layout_matrix =  rbind(c(1,1,1,2,2,4,4),
+#                                              c(1,1,1,2,2,4,4),
+#                                              c(1,1,1,2,2,4,4),
+#                                              c(1,1,1,2,2,4,4),
+#                                              c(1,1,1,3,3,4,4),
+#                                              c(1,1,1,3,3,4,4)))
+#          
+#        })
+# dev.off()
+
+
+pdf("Figures/Sample QC summary plots.pdf", width = 16, height = 10, useDingbats = F)
+sapply(1:length(tissues_in_data),
+       FUN = function(i) {
+         tis_ = tissues_in_data[i]
+         grid.arrange(umap1_zoom_plots[[i]],
+                      plots_spearman_dendrogram_zoom[[i]],
+                      
+                      plots_correlation_only_spearman[[i]], 
+                      layout_matrix =  rbind(c(1,1,1,2,2,4,4)))
+         
+       })
+dev.off()
+```
+
+
+# Investigate sample mixup
+
+```{r XY, echo = F, warning = F, message = F, results=F}
+Y_genes <- 
+  XY_genes %>% 
+  filter(chromosome == "Y")
+
+pig_Y_data <- 
+  wide_tmm_pig_data %>%
+  # Remove genes that are not expressed
+  {.[-which(rownames(.) %in% enssscg_not_expressed),]} %>% 
+  t() %>%
+  {.[,which(colnames(.) %in% Y_genes$enssscg_id)]} 
+
+sex_diff_genes <-
+  pig_Y_data %>%
+  as_tibble(rownames = "sample_ID") %>%
+  gather("enssscg_id", "tpm", -1)  %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+  left_join(sample_meta,
+            by = "individual") %>% 
+  group_by(enssscg_id, sex, tissue) %>%
+  summarise(tpm = median(tpm)) %>%
+  spread(sex, tpm) %>%
+  mutate(diff = (male - female)/male) %>%
+  group_by(enssscg_id) %>%
+  mutate(n_exp = length(which(male > 1))) %>%
+  filter(n_exp > 0.5) %>%
+  summarise(mean_diff = mean(diff, na.rm = T)) %>%
+  filter(mean_diff > 0.5 & is.finite(mean_diff)) %$% 
+  unique(enssscg_id)
+
+
+pig_Y_data %>%
+  # {.[,sex_diff_genes]}%>% 
+  {log10(.+1)}%>%
+  
+  pheatmap(color = heatmap_palette,
+           clustering_method = "ward.D2",
+           annotation_row = left_join(sample_mah,
+                                      sample_meta,
+                                      by = "individual") %>%
+             ungroup() %>%
+             separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+             left_join(tissue_mapping,
+                       by = "tissue") %>%
+             select(sample_ID, sex, tissue_name) %>%
+             
+             column_to_rownames("sample_ID"), 
+           annotation_colors = list(tissue_name = tissue_colors_palette,
+                                    sex = c("female" = "red", "male" = "skyblue")),
+           annotation_legend = F,
+           show_rownames = F, 
+           show_colnames = F,
+           filename = "Figures/Heatmap expression Y genes.pdf",
+           height = 10, width = 10, useDingbats = F)
+
+
+pig_pca_XY <- 
+  pig_Y_data %>%
+  # {.[,sex_diff_genes]}%>% 
+  {log10(. + 1)} %>% 
+  pca(nPcs = 10) 
+
+PCX = c("PC1", "PC1", "PC1")
+PCY = c("PC2", "PC3", "PC4")
+
+pdf("Figures/PCA Y genes.pdf", height = 6, width = 12, useDingbats = F)
+mapply(PCX, PCY, 
+       FUN = function(PCX, PCY) {
+         
+         pca_scores_XY <- 
+           scores(pig_pca_XY) %>%
+           as_tibble(rownames = "sample_ID") %>%
+           rename(PCX = PCX,
+                  PCY = PCY ) %>%
+           
+           separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+           left_join(tissue_mapping, 
+                     by = "tissue") %>%
+           left_join(sample_meta,
+                     by = "individual")
+         
+         
+         pca_plot_data_XY <- 
+           pca_scores_XY %>%
+           group_by(tissue_name) %>%
+           mutate(mean_PCX = mean(PCX),
+                  mean_PCY = mean(PCY)) %>%
+           ungroup()
+         
+         pca_plot_XY1 <- 
+           pca_plot_data_XY %>%
+           ggplot(aes(PCX, PCY, color = tissue_name)) + 
+           geom_point(show.legend = F) + 
+           scale_color_manual(values = tissue_colors_palette) + 
+           simple_theme + 
+           geom_segment(data = filter(pca_plot_data_XY, tissue_name == "pancreas"),
+                        aes(xend = mean_PCX, yend = mean_PCY),
+                        show.legend = F) + 
+           geom_text(data = select(pca_plot_data_XY, tissue_name, mean_PCX, mean_PCY) %>%
+                       filter(tissue_name == "pancreas") %>%
+                       unique(),
+                     aes(x = mean_PCX, y = mean_PCY, label = tissue_name),
+                     show.legend = F) + 
+           xlab(PCX) +
+           ylab(PCY)
+         
+         pca_plot_XY2 <- 
+           pca_plot_data_XY %>%
+           ggplot(aes(PCX, PCY, color = sex)) + 
+           geom_point(show.legend = F) + 
+           scale_color_manual(values = c("female" = "orangered", "male" = "skyblue")) + 
+           simple_theme + 
+           # geom_segment(aes(xend = mean_PCX, yend = mean_PCY),
+           #              show.legend = F) + 
+           # geom_text(data = select(pca_plot_data_XY, sex, tissue_name, mean_PCX, mean_PCY) %>%
+           #             unique(),
+           #           aes(x = mean_PCX, y = mean_PCY, label = tissue_name),
+           #           show.legend = F) + 
+           xlab(PCX) +
+           ylab(PCY)
+         
+         grid.arrange(pca_plot_XY1, pca_plot_XY2, ncol = 2)
+         
+       })
+dev.off()
+
+```
+
+
+```{r Y_genes_human, eval = F, include = F}
+
+
+
+human_Y_chr_genes <- 
+  gene_chromosome_human %>% 
+  filter(chr_name == "Y") %$%
+  ensg_id
+
+human_sample_data %>% 
+  filter(ensg_id %in% human_Y_chr_genes) %>%
+  select(1,3,4) %>%
+  spread(ensg_id, tpm) %>%
+  column_to_rownames("sample_ID") %>%
+  as.matrix() %>%
+  {log10(.+1)}%>%
+  
+  pheatmap(color = heatmap_palette,
+           clustering_method = "ward.D2", 
+           border_color = NA,
+           # annotation_row = left_join(sample_mah,
+           #                            sample_meta,
+           #                            by = "individual") %>%
+           #   ungroup() %>%
+           #   separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+           #   left_join(tissue_mapping,
+           #             by = "tissue") %>%
+           #   select(sample_ID, sex, tissue_name) %>%
+           #   
+           #   column_to_rownames("sample_ID"), 
+           # annotation_colors = list(tissue_name = tissue_colors_palette,
+           #                          sex = c("female" = "red", "male" = "skyblue")),
+           annotation_legend = F,
+           show_rownames = F, 
+           show_colnames = T,
+           filename = "Figures/Heatmap expression Y genes human.pdf",
+           height = 10, width = 10, useDingbats = F)
+
+
+Y_genes <- 
+  gene_chromosome %>% 
+  filter(`Chromosome/scaffold name` == "Y") %$%
+   `Gene stable ID`
+
+pig_data %>% 
+  filter(enssscg_id %in% Y_genes) %>% 
+  filter(enssscg_id %in% gene_orthologs$enssscg_id) %>%
+  unite(col = "sample_ID", tissue_ID, individual, sep = "_") %>%
+  select(1,2, tpm) %>%
+  spread(enssscg_id, tpm) %>%
+  column_to_rownames("sample_ID") %>%
+  as.matrix() %>%
+  {log10(.+1)}%>%
+  
+  pheatmap(color = heatmap_palette,
+           clustering_method = "ward.D2", 
+           border_color = NA,
+           # annotation_row = left_join(sample_mah,
+           #                            sample_meta,
+           #                            by = "individual") %>%
+           #   ungroup() %>%
+           #   separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>%
+           #   left_join(tissue_mapping,
+           #             by = "tissue") %>%
+           #   select(sample_ID, sex, tissue_name) %>%
+           #   
+           #   column_to_rownames("sample_ID"), 
+           # annotation_colors = list(tissue_name = tissue_colors_palette,
+           #                          sex = c("female" = "red", "male" = "skyblue")),
+           annotation_legend = F,
+           show_rownames = F, 
+           show_colnames = T)
+           filename = "Figures/Heatmap expression Y genes human.pdf",
+           height = 10, width = 10, useDingbats = F)
+
+```
+
+
+#Filtered samples
+
+The following section describes which samples were removed from the data set. Summary plots for each individual tissue can be found in the file "Sample QC summary.pdf". Please see this file for plots showing how samples cluster in relation to their tissue and to the dataset as a whole.
+
+```{r removed_samples, echo = F}
+removed_samples <- 
+  c("vein_c" = "Wrong tissue collected, nerve was collected instead of vein as confirmed by histology",
+    "vein_d" = "Clusters far from other vein samples",
+    "skiB_a" = "Clusters far from other skin samples",
+    "skiB_b" = "Clusters far from other skin samples",
+    "skiH_b" = "Clusters far from other skin samples",
+    "pan_a" = "A large proportion of genes has TPM = 0",
+    "pan_b" = "A large proportion of genes has TPM = 0",
+    "pan_c" = "A large proportion of genes has TPM = 0",
+    "pan_d" = "A large proportion of genes has TPM = 0",
+    "carJ_b" = "A large proportion of genes has TPM = 0 (and it therefore clusters with some pancreas samples)",
+    "skiL_c" = "Histology showed the sample included a lot of hair folicles",
+    "smoU_a" = "Histology showed that the sample was mostly cervix, and clustering confirms this",
+    "smoU_b" = "Histology showed that the sample was mostly cervix, and clustering confirms this",
+    "heaV_c" = "Clusters far from other heart muscle samples",
+    "stoU_a" = "Clusters far from other GI samples and the sample included some esophagus in contrast to other samples",
+    "ton_b" = "Clustering and histology shows that sample is not tonsil, but esophagus", 
+    "OB-3X" = 'This sample was an extra "rouge sample" of olfactory bulb from one individual') %>%
+  enframe("sample_ID", "comment") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F)  
+
+knitr::kable(removed_samples, caption = "Samples that were removed from the data set")
+
+write_csv(removed_samples, "Removed samples.csv")
+
+
+
+pig_data %>% 
+  unite(tissue_ID, individual, col = "sample_ID", sep = "_", remove = F) %>%
+  filter(!sample_ID %in% removed_samples$sample_ID) %>%
+  select(1:4, 9) %>%
+  write_delim("pig_filtered_sample_data.tab", delim = "\t")
+```
+
+The following plots show the clustering after problematic samples have been excluded.
+
+```{r UMAP_removed_samples, echo = F, warning = F, message = F, results=F}
+
+all(removed_samples$sample_ID %in% rownames(pig_pca_data))
+pig_pca_removed <- 
+  pig_pca_data %>%
+  {.[-which(rownames(.) %in% removed_samples$sample_ID),]} %>%
+  pca(nPcs = 100)
+
+
+
+if(file.exists("pig_pca_removed_samples_stats.RData")) {
+  load(file = "pig_pca_removed_samples_stats.RData")
+} else {
+  set.seed(42)
+  pig_pca_stats_removed <- 
+    tibble(PC = 1:100, 
+           # Q2 = Q2(pig_pca_removed, 
+           #         originalData = pig_pca_data %>%
+           #         {.[-which(rownames(.) %in% removed_samples),]}),
+           R2cum = R2cum(pig_pca_removed))
+           # prev_Q2 = c(NA, Q2[-length(Q2)]), 
+           # Q2cum = prev_Q2 + (1 - prev_Q2) * Q2)
+  
+  save(pig_pca_stats_removed, file = "pig_pca_removed_samples_stats.RData")
+}
+
+
+
+# informative_comps_removed <- pig_pca_stats_removed$PC[which(pig_pca_stats_removed$Q2 == max(pig_pca_stats_removed$Q2, na.rm = T))]
+informative_comps_removed2 <- pig_pca_stats_removed$PC[which(pig_pca_stats_removed$R2cum > 0.95)[1]]
+
+# 
+# pig_pca_stats_removed %>%
+#   select(PC, R2cum) %>%
+#   gather("stat", "value", -PC) %>%
+#   ggplot(aes(PC, value, color = stat)) + 
+#   geom_point() + 
+#   geom_line() + 
+#   simple_theme +
+#   geom_vline(xintercept = c(informative_comps_removed2), linetype = "dashed") + 
+#   annotate("text", 
+#            x = c(informative_comps_removed2) + 1,
+#            y = 0.4, 
+#            label = paste0("PC ", c(informative_comps_removed2)),
+#            hjust = 0, 
+#            vjust = 0) + 
+#   
+#   annotate("text", 
+#            x = c(informative_comps_removed2) + 1,
+#            y = c(pig_pca_stats_removed[informative_comps_removed2, ]$R2cum + 0.01), 
+#            label = paste0("\nR2 = ", round(c(pig_pca_stats_removed[informative_comps_removed2, ]$R2cum), 3)),
+#            hjust = 0, 
+#            vjust = 1)
+
+
+# PCA
+
+pca_scores_removed <- 
+  scores(pig_pca_removed) %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+pca_plot_data_removed <- 
+  pca_scores_removed %>%
+  group_by(tissue_name) %>%
+  mutate(mean_PC1 = mean(PC1),
+         mean_PC2 = mean(PC2)) %>%
+  ungroup()
+
+pca_plot_removed <- 
+  pca_plot_data_removed %>%
+  ggplot(aes(PC1, PC2, color = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme + 
+  geom_segment(aes(xend = mean_PC1, yend = mean_PC2),
+               show.legend = F) + 
+  geom_text(data = select(pca_plot_data_removed, tissue_name, mean_PC1, mean_PC2) %>%
+              unique(),
+            aes(x = mean_PC1, y = mean_PC2, label = tissue_name),
+            show.legend = F)
+
+pca_plot_removed
+
+ggsave("Figures/PCA plot big removed outliers.pdf", plot = pca_plot_removed, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/PCA plot removed outliers.pdf", plot = pca_plot_removed, height = 10, width = 10, useDingbats = F)
+
+# UMAP
+
+set.seed(42)
+
+umap_res_removed <- 
+  pig_pca_data %>%
+  {.[-which(rownames(.) %in% removed_samples$sample_ID),]} %>%
+  umap(n_components = 2,
+       n_epochs = 1000)
+
+umap_scores_removed <- 
+  umap_res_removed$layout %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+umap_plot_data_removed <- 
+  umap_scores_removed %>%
+  group_by(tissue_name) %>%
+  mutate(mean_V1 = mean(V1),
+         mean_V2 = mean(V2)) %>%
+  ungroup()
+
+umap_plot_removed <- 
+  umap_plot_data_removed %>%
+  
+  ggplot(aes(V1, V2, color = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme + 
+  geom_segment(aes(xend = mean_V1, yend = mean_V2),
+               show.legend = F) + 
+  geom_text(data = select(umap_plot_data_removed, tissue_name, mean_V1, mean_V2) %>%
+              unique(),
+            aes(x = mean_V1, y = mean_V2, label = tissue_name),
+            show.legend = F)
+
+
+umap_plot_removed
+
+ggsave("Figures/UMAP plot big removed outliers.pdf", plot = umap_plot_removed, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/UMAP plot removed outliers.pdf", plot = umap_plot_removed, height = 10, width = 10, useDingbats = F)
+
+
+
+
+# Umap on PCA
+
+
+set.seed(42)
+
+umap_res_removed <- 
+  scores(pig_pca_removed)[,1:informative_comps_removed2] %>%
+  umap(n_components = 2,
+       n_epochs = 1000)
+
+umap_scores_removed <- 
+  umap_res_removed$layout %>%
+  as_tibble(rownames = "sample_ID") %>%
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+umap_plot_data_removed <- 
+  umap_scores_removed %>%
+  group_by(tissue_name) %>%
+  mutate(mean_V1 = mean(V1),
+         mean_V2 = mean(V2)) %>%
+  ungroup()
+
+umap_plot_removed <- 
+  umap_plot_data_removed %>%
+  
+  ggplot(aes(V1, V2, color = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme + 
+  geom_segment(aes(xend = mean_V1, yend = mean_V2),
+               show.legend = F) + 
+  geom_text(data = select(umap_plot_data_removed, tissue_name, mean_V1, mean_V2) %>%
+              unique(),
+            aes(x = mean_V1, y = mean_V2, label = tissue_name),
+            show.legend = F)
+
+
+umap_plot_removed
+
+ggsave("Figures/UMAP on PCA plot big removed outliers.pdf", plot = umap_plot_removed, height = 40, width = 40, useDingbats = F)
+ggsave("Figures/UMAP on PCA plot removed outliers.pdf", plot = umap_plot_removed, height = 10, width = 10, useDingbats = F)
+
+
+```
+
+
+```{r UMAP_evolution_test, eval = F, include = F}
+epochs = 1:100
+UMAP_evo_res <- 
+  lapply(epochs, 
+         FUN = function(epoch) {
+           set.seed(42)
+           
+           umap_res_temp <- 
+             scores(pig_pca_removed)[,1:informative_comps_removed2] %>%
+             umap(n_components = 2,
+                  n_epochs = epoch)
+           
+           umap_res_temp$layout %>% 
+             as_tibble(rownames = "sample_ID") 
+         })
+
+
+umap_scores_evo <- 
+  UMAP_evo_res %>%
+  set_names(epochs) %>%
+  plyr::ldply(.id = "epoch") %>%
+  as_tibble() %>% 
+  separate(col = sample_ID, into = c("tissue", "individual"), sep = "_", remove = F) %>% 
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+umap_plot_data_evo <- 
+  umap_scores_evo %>%
+  group_by(tissue_name, epoch) %>%
+  mutate(mean_V1 = mean(V1),
+         mean_V2 = mean(V2)) %>%
+  ungroup()
+
+
+require(gganimate)
+
+
+umap_plot_evo <- 
+  umap_plot_data_evo %>%
+  mutate(epoch = as.numeric(epoch)) %>%
+  # filter(epoch == 1) %>%
+   
+  ggplot(aes(V1, V2, color = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme + 
+  geom_segment(aes(xend = mean_V1, yend = mean_V2),
+               show.legend = F) + 
+  geom_text(aes(x = mean_V1, y = mean_V2, label = tissue_name),
+            show.legend = F) + 
+  transition_time(epoch) +
+  labs(title = "Epoch: {frame_time}")
+
+
+umap_plot_evo
+anim_save(filename = "Figures/UMAP on PCA (samples removed) epoch evolution.gif", 
+          animation = umap_plot_evo, 
+          nframes = 1000,
+          width= 1000, height=1000)
+
+
+
+```
+
+```{r consensus_clustering_removed, echo = F, warning=F, message=F, results=F}
+wide_tmm_pig_data_consensus_removed <- 
+  pig_data_norm %>%
+  unite(tissue_ID, individual, col = "sample_ID", remove = F) %>%
+  filter(!sample_ID %in% removed_samples$sample_ID) %>%
+  group_by(enssscg_id,
+           tissue_ID,
+           tissue_name,
+           consensus_tissue_name,
+           organ_name) %>%
+  summarise(tpm = mean(tpm),
+            tmm = mean(tmm)) %>% 
+  ungroup() %>%
+  select(1, 2, tmm) %>%
+  spread(key = tissue_ID, value = tmm) %>%
+  column_to_rownames("enssscg_id")
+
+
+pig_consensus_pca_removed <- 
+  wide_tmm_pig_data_consensus_removed %>%
+  {log10(. + 1)} %>%
+  t() %>%
+  pca(nPcs = 50)
+
+
+pig_consensus_pca_stats_removed <- 
+  tibble(PC = 1:50, 
+         R2cum = R2cum(pig_consensus_pca_removed))
+  
+informative_comps2_consensus_removed <- pig_consensus_pca_stats_removed$PC[which(pig_consensus_pca_stats_removed$R2cum > 0.95)[1]]
+
+pca_scores_consensus_removed <- 
+  scores(pig_consensus_pca_removed) %>%
+  as_tibble(rownames = "tissue")  %>%
+  left_join(tissue_mapping, 
+            by = "tissue")
+
+
+
+pca_plot_consensus_no_text_removed <- 
+  pca_scores_consensus_removed %>%
+  ggplot(aes(PC1, PC2, color = tissue_name, label = tissue_name)) + 
+  geom_point(show.legend = F) + 
+  scale_color_manual(values = tissue_colors_palette) + 
+  simple_theme 
+
+pca_plot_consensus_removed <- 
+  pca_plot_consensus_no_text_removed +
+  geom_text_repel(show.legend = F)
+
+pca_plot_consensus_removed + 
+  ggtitle("PCA")
+
+
+sample_PCA_level_clust_consensus_removed <- 
+  scores(pig_consensus_pca_removed)[,1:informative_comps2_consensus_removed] %>%
+  dist() %>%
+  hclust(method = "ward.D2") 
+
+dendr <- 
+  sample_PCA_level_clust_consensus_removed %>%
+  dendro_data()
+
+dendro_plot_data <- 
+  left_join(dendr$segments, 
+            dendr$labels, 
+            by = c("x" = "x", "yend" = "y")) %>% 
+  rename(tissue = label) %>%
+  left_join(tissue_mapping, 
+            by = c("tissue"))
+
+plot_PCA_dist_dendrogram_consensus_removed <- 
+  dendro_plot_data %>%
+  ggplot() +
+  geom_segment(aes(x=y, y=x, xend=yend, yend=xend, group = tissue))+
+  geom_text(data = ggdendro::label(dendr) %>%
+              as_tibble() %>%
+              rename(tissue = label) %>%
+              left_join(tissue_mapping, by = "tissue"),
+            aes(label=tissue_name,
+                x=0,
+                y=x,
+                color = tissue_name),
+            size = 3,
+            hjust = 0,
+            nudge_x = 1,
+            show.legend = F)+
+  # scale_y_continuous(limits = c(-0.25, 1.25),
+  #                    breaks = c(0, 0.05, 0.1, 0.15, 0.2, 0.25))+
+  scale_color_manual(values = c(tissue_colors_palette))+
+  scale_x_reverse(expand = c(0.45, 0), breaks = (0:3)*50)+
+  # scale_x_continuous(expand = c(0.15, 0))+
+  # scale_x_continuous(expand = c(0, 0.1))+
+  # theme_void()+
+  theme(axis.text.y = element_blank(), 
+        axis.title = element_blank(), 
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(1,1,1,1), units = "mm"), 
+        panel.background = element_blank()) 
+
+plot_PCA_dist_dendrogram_consensus_removed
+```
+
+    
+  
+    
+
+```{r ggraph_dendrogram_test, eval = F, include = F}
+
+require(ggraph)
+require(igraph)
+require(viridis)
+
+map_colors_to_edge <- function(edge_data, g, mean_color = F, default_color = "gray80") {
+  mapped_colors <- 
+    edge_data %>%
+    as_tibble() %>% 
+    left_join(tissue_colors %>% 
+                select(label = tissue, 
+                       color = tissue_color), 
+              by = c("node2.label" = "label")) %>%
+    mutate(radius = xend^2 + yend^2,
+           edge.id = as.character(edge.id)) %>%
+    arrange(-radius)
+  
+  mapped_colors %>%
+    filter(!near(radius, 1)) %$%
+    sapply(edge.id,
+           FUN = function(edge_id_) {
+             xend_ = mapped_colors$xend[which(mapped_colors$edge.id == edge_id_)]
+             yend_ = mapped_colors$yend[which(mapped_colors$edge.id == edge_id_)]
+
+             new_color <-
+               mapped_colors %>%
+               filter(near(x, xend_) & near(y, yend_)) %$%
+               ifelse(mean_color,
+                      colorRampPalette(color)(3)[2],
+                      ifelse(length(unique(color)) == 1, 
+                             unique(color), default_color))
+               
+               
+             new_color_column <- mapped_colors$color
+             new_color_column[which(mapped_colors$edge.id == edge_id_)] <- new_color
+             
+             mapped_colors$color <<- new_color_column
+             NULL
+
+             
+           })
+  
+  
+  mapped_colors
+}
+
+circular_dendrogram <- 
+  function(clust, mean_color = F) {
+    dendrogram <- 
+      clust %>%
+      as.dendrogram()
+    
+    
+    
+    g <- 
+      ggraph(dendrogram, layout = 'dendrogram', circular = T) 
+    # g + 
+    #   # scale_edge_color_gradientn(colours = viridis(20)) +
+    #   
+    #   scale_edge_width(range = c(1.5, 6))+
+    #   geom_edge_diagonal(strength = 0.8, 
+    #                      # width = 1.5, 
+    #                      show.legend = F) + 
+    #   # scale_edge_color_discrete()+
+    #   
+    #   geom_node_text(aes(label = label))  + 
+    #   scale_x_continuous(expand = expand_scale(c(0.25, 0.25))) +
+    #   scale_y_continuous(expand = expand_scale(c(0.25, 0.25))) +
+    #   
+    #   coord_fixed() + 
+    #   theme_void()
+    
+    
+    edge_data <- get_edges()(g$data)
+    
+    # ggplot(edge_data, aes(x, y, xend = xend, yend = yend)) + 
+    #   geom_segment(arrow = arrow())
+    
+    edge_data_colors <- map_colors_to_edge(edge_data, mean_color = mean_color)
+    edge_data_colors
+    
+    g + 
+      # scale_edge_color_gradientn(colours = viridis(20)) +
+      
+      scale_edge_width(range = c(1.5, 6))+
+      geom_edge_diagonal(aes(edge_color = as.character(edge_data$edge.id),
+                             edge_width = 1 - sqrt(xend^2 + yend^2)),
+                         # geom_edge_diagonal(aes(edge_color = sqrt(x^2 + y^2)),
+                         # geom_edge_diagonal(edge_color = g$data %>%
+                         #                      left_join(tissue_colors,
+                         #                                by = c("label" = "tissue")) %$%
+                         #                      tissue_color,
+                         strength = 0.8, 
+                         # width = 1.5, 
+                         show.legend = F) + 
+      scale_edge_color_manual(values = edge_data_colors %$%
+                                set_names(c(color, "gray80"), c(edge.id, "")))  +
+      # scale_edge_color_discrete()+
+      g$data %>%
+      filter(label != "") %>%
+      # mutate(x_scaled = scales::rescale(x, c(0, 359))) %>%
+      mutate(degree = case_when(x >= 0 ~ asin(y) * 180 / pi, 
+                                x < 0 ~ 360 - asin(y) * 180 / pi)) %>% 
+      left_join(tissue_mapping, 
+                by = c("label" = "tissue")) %>%
+                {geom_node_text(data = .,
+                                aes(label = tissue_name), 
+                                angle = .$degree, 
+                                hjust = ifelse(.$x < 0, 1, 0), 
+                                vjust = 0.5,
+                                size = 3)}  + 
+      scale_x_continuous(expand = expand_scale(c(0.25, 0.25))) +
+      scale_y_continuous(expand = expand_scale(c(0.25, 0.25))) +
+      
+      coord_fixed() + 
+      theme_void()
+  }
+
+
+
+sample_spearman_clust_consensus %>%
+  circular_dendrogram()
+
+wide_tmm_pig_data_consensus_removed %>%
+  cor(method = "spearman") %>%
+  {1 - .} %>%
+  as.dist() %>%
+  hclust("average") %>%
+  circular_dendrogram()
+
+sample_PCA_level_clust_consensus %>%
+  circular_dendrogram()
+
+scores(pig_consensus_pca_removed)[,1:informative_comps2_consensus_removed] %>%
+  dist() %>%
+  hclust(method = "ward.D2") %>%
+  circular_dendrogram(mean_color = F)
+
+scores(pig_consensus_pca_removed)[,1:informative_comps2_consensus_removed] %>%
+  umap(n_components = 20,
+       n_epochs = 200) %$%
+  dist(layout) %>%
+  hclust(method = "average") %>%
+  circular_dendrogram(mean_color = F)
+
+ggsave("Figures/dendrogram test.pdf", height = 10, width = 10, useDingbats = F)
+
+save(pig_consensus_pca_removed,
+     informative_comps2_consensus_removed,
+     circular_dendrogram, 
+     map_colors_to_edge,
+     tissue_colors,
+     tissue_mapping,
+     file = "Environment for Wen.Rdata")
+```

@@ -1,0 +1,18 @@
+sample_ID,tissue,individual,comment
+vein_c,vein,c,"Wrong tissue collected, nerve was collected instead of vein as confirmed by histology"
+vein_d,vein,d,Clusters far from other vein samples
+skiB_a,skiB,a,Clusters far from other skin samples
+skiB_b,skiB,b,Clusters far from other skin samples
+skiH_b,skiH,b,Clusters far from other skin samples
+pan_a,pan,a,A large proportion of genes has TPM = 0
+pan_b,pan,b,A large proportion of genes has TPM = 0
+pan_c,pan,c,A large proportion of genes has TPM = 0
+pan_d,pan,d,A large proportion of genes has TPM = 0
+carJ_b,carJ,b,A large proportion of genes has TPM = 0 (and it therefore clusters with some pancreas samples)
+skiL_c,skiL,c,Histology showed the sample included a lot of hair folicles
+smoU_a,smoU,a,"Histology showed that the sample was mostly cervix, and clustering confirms this"
+smoU_b,smoU,b,"Histology showed that the sample was mostly cervix, and clustering confirms this"
+heaV_c,heaV,c,Clusters far from other heart muscle samples
+stoU_a,stoU,a,Clusters far from other GI samples and the sample included some esophagus in contrast to other samples
+ton_b,ton,b,"Clustering and histology shows that sample is not tonsil, but esophagus"
+OB-3X,OB-3X,NA,"This sample was an extra ""rouge sample"" of olfactory bulb from one individual"

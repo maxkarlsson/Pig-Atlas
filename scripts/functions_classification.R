@@ -122,3 +122,51 @@ hpa_gene_classification <-
     
     
   }	
+
+
+
+calc_gene_correlations <- 
+  function(data, var1, var2, val1, val2, cor_method = "spearman", p_adjust_method = "BH", alternative = "two.sided") {
+    
+    data_ <- 
+      data %>%
+      rename(var1 = var1, 
+             var2 = var2, 
+             val1 = val1, 
+             val2 = val2)
+      
+    
+    data_ %>%
+      group_by(var1, var2) %>% 
+      do(if(cor_method == "pearson") {
+        cor.test(.$val1, .$val2, method = cor_method, alternative = alternative) %$%
+          tibble(pval = p.value, 
+                 cor = estimate, 
+                 lo_confint = conf.int[1], 
+                 hi_confint = conf.int[2])
+      } else if(cor_method == "spearman") {
+        cor.test(.$val1, .$val2, method = cor_method, alternative = alternative) %$%
+          tibble(pval = p.value, 
+                 cor = estimate)
+        }) %>% 
+      ungroup() %>%
+      mutate(padj = p.adjust(pval, method = p_adjust_method), 
+             significant = padj <= 0.05, 
+             log10P = -log10(padj)) %>% 
+      arrange(padj) %>% 
+      set_colnames(c(var1, var2, colnames(.)[-c(1, 2)]))
+  }
+
+
+
+
+
+
+
+
+
+
+
+
+
+

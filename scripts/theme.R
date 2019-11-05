@@ -30,6 +30,13 @@ gene_category_pal <-
     "not detected " = "grey")
 
 
+gene_category_pal_human_pig <- 
+  gene_category_pal %>% 
+  enframe() %>% 
+  do(bind_rows(mutate(., name = paste(name, "human")),
+               mutate(., name = paste(name, "pig")))) %$% 
+  set_names(value, name) 
+
 # protein_type_pal <- 
 #   c("secreted" = '#911D51',
 #     "membrane" = '#6D4BAA', 

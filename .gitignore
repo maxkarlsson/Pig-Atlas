@@ -2,7 +2,9 @@
 .Rhistory
 .RData
 .Ruserdata
+.RDataTmp
 data
 doc
 results
 scripts/QC/Figures
+**.Rdata

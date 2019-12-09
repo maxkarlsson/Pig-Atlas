@@ -55,15 +55,15 @@ hpa_gene_classification <-
         
         
         # Expression patterns
-        enrichment_group = paste(sort(tissue[which(expression >= lim & expression >= det_lim)]), collapse=", "),
+        enrichment_group = paste(sort(tissue[which(expression >= lim & expression >= det_lim)]), collapse=";"),
         
         n_enriched = length(tissue[which(expression >= lim & expression >= det_lim)]),
         n_enhanced = length(exps_enhanced[[1]]), 
-        enhanced_in = paste(sort(tissue[exps_enhanced[[1]]]), collapse=", "),
+        enhanced_in = paste(sort(tissue[exps_enhanced[[1]]]), collapse=";"),
         n_na = n_groups - length(expression),
         max_2nd_or_lim = max(max_2nd, det_lim*0.1),
-        tissues_not_detected = paste(sort(tissue[which(expression < det_lim)]), collapse=", "),
-        tissues_detected = paste(sort(tissue[which(expression >= det_lim)]), collapse=", ")) 
+        tissues_not_detected = paste(sort(tissue[which(expression < det_lim)]), collapse=";"),
+        tissues_detected = paste(sort(tissue[which(expression >= det_lim)]), collapse=";")) 
       
     
     gene_categories <- 
@@ -157,7 +157,29 @@ calc_gene_correlations <-
       set_colnames(c(var1, var2, colnames(.)[-c(1, 2)]))
   }
 
-
+calc_gene_distance <- 
+  function(data, var1, var2, val1, val2) {
+    
+    data_ <- 
+      data %>%
+      rename(var1 = var1, 
+             var2 = var2, 
+             val1 = val1, 
+             val2 = val2)
+    
+    
+    data_ %>%
+      group_by(var1, var2) %>% 
+      summarise(dist = rbind(val1, val2) %>% 
+                  dist() %>% 
+                  as.numeric(), 
+                mean_var1 = mean(val1), 
+                mean_var2 = mean(val2), 
+                common_mean = mean(c(val1, val2))) %>% 
+      ungroup() %>%
+      arrange(dist) %>% 
+      set_colnames(c(var1, var2, "dist", paste0("mean_", c(var1, var2)), "common_mean"))
+  }
 
 
 

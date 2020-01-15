@@ -6,19 +6,35 @@ spec_category_levels <-
     'group enriched', 
     'tissue enhanced', 
     'low tissue specificity',  
-    'not detected')
+    'not detected',
+    
+    'Tissue enriched',
+    'Group enriched', 
+    'Tissue enhanced', 
+    'Low tissue specificity',  
+    'Not detected')
 
 dist_category_levels <- 
   c('detected in all', 
     'detected in many', 
     'detected in some', 
     'detected in single', 
-    'not detected')
+    'not detected',
+    
+    'Detected in all', 
+    'Detected in many', 
+    'Detected in some', 
+    'Detected in single', 
+    'Not detected')
 
 enrichment_overlap_levels <- 
   c("full overlap", 
     "partial overlap", 
-    "no overlap")
+    "no overlap",
+    
+    "Full overlap", 
+    "Partial overlap", 
+    "No overlap")
 
 shared_category_levels <- 
   c("shared", 
@@ -27,14 +43,23 @@ shared_category_levels <-
     "major difference")
 
 enrichment_overlap_pal <-
-  set_names(c(viridis(3), inferno(4)),
+  set_names(c(viridis(3), inferno(4),
+              viridis(3), inferno(4)),
             c("full overlap", 
               "partial overlap", 
               "no overlap", 
               "shared", 
               "minor difference", 
               "medium difference",
-              "major difference"))
+              "major difference",
+              
+              "Full overlap", 
+              "Partial overlap", 
+              "No overlap", 
+              "Shared", 
+              "Minor difference", 
+              "Medium difference",
+              "Major difference"))
 
 
 spec_category_overlap_levels <-
@@ -102,7 +127,20 @@ gene_category_pal <-
     "detected in single" = "#a1dab4",
     
     "not detected" = "grey", 
-    "not detected " = "grey")
+    "not detected " = "grey", 
+    
+    "Tissue enriched" = "#e41a1c",
+    "Group enriched" = "#FF9D00",
+    "Tissue enhanced" = "#984ea3",
+    "Low tissue specificity" = "grey40",
+    
+    "Detected in all" = "#253494",
+    "Detected in many" = "#2c7fb8",
+    "Detected in some" = "#41b6c4",
+    "Detected in single" = "#a1dab4",
+    
+    "Not detected" = "grey", 
+    "Not detected " = "grey")
 
 
 gene_category_pal_human_pig <- 
@@ -118,6 +156,43 @@ gene_category_pal_comparison <-
   do(bind_rows(mutate(., name = paste(name, "canon")),
                mutate(., name = paste(name, "comparison")))) %$% 
   set_names(value, name) 
+
+anova_pal <- 
+  c("Residuals and species" = "gray",
+    "Residuals" = "gray", 
+    "tissue_ID" = "#D95E37", 
+    "comparison_tissue" = "#D95E37", 
+    "Tissue" = "#D95E37", 
+    "individual" = "#149684", 
+    "species" = "#F9C770",
+    "Species" = "#F9C770",
+    "sex" = "#E8C9C7")
+
+anova_levels <- 
+  c("Residuals and species",
+    "Residuals", 
+    "tissue_ID", 
+    "comparison_tissue", 
+    "Tissue",
+    "individual", 
+    "species",
+    "Species",
+    "sex")
+
+sex_palette <- 
+  c("male" = "#D96767", "female" = "#214785")
+
+elevation_identity_levels <- 
+  c("identity", "overlapping tissues", "different tissues", "no enrichment")
+
+elevation_identity_pal <- 
+  set_names(rev(pals::ocean.haline(9)[c(3, 4, 6, 7)]), elevation_identity_levels)
+
+elevation_overlap_levels <- 
+  c("Pig", "Both", "Human")
+
+elevation_overlap_pal <- 
+  set_names(rev(pals::ocean.haline(9)[c(3, 4, 6)]), elevation_overlap_levels)
 
 # protein_type_pal <- 
 #   c("secreted" = '#911D51',

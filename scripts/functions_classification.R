@@ -183,7 +183,39 @@ calc_gene_distance <-
 
 
 
-
+make_ortholog_net <- 
+  function(orthologs) {
+    edges <- 
+      orthologs %>%
+      select(from = 1, 
+             to = 2) %>% 
+      mutate(weight = 1)
+    
+    nodes <- 
+      orthologs %$%
+      c(enssscg_id,
+        ensg_id) %>% 
+      unique()
+    
+    
+    orth_net <- 
+      graph_from_data_frame(d = edges, 
+                            vertices = nodes, 
+                            directed = F)
+    
+    ortholog_communities <- 
+      components(orth_net) %$% 
+      left_join(enframe(membership, 
+                        "node", "community"), 
+                enframe(csize, 
+                        "community", "community_size"), 
+                by = "community")
+    
+    list(edges = edges, 
+         nodes = nodes, 
+         network = orth_net,
+         communities = ortholog_communities)
+  }
 
 
 

@@ -416,6 +416,70 @@ class_tissue_n_enriched_barplot <- function(class_table) {
     scale_y_continuous(position = "bottom")
 }
 
+class_tissue_n_enriched_barplot_dendro <- function(class_table, dendro, pal, width = 1) {
+  
+  class_table_temp <-
+    class_table %>%
+    select(gene, spec_category, enriched_tissues) %>%
+    separate_rows(enriched_tissues, sep = ";")
+  
+  
+  tissues_not_in_plot <- with(tissue_mapping, consensus_tissue_name[which(!consensus_tissue_name %in% class_table_temp$enriched_tissues)])
+  
+  if(length(tissues_not_in_plot) != 0) warning(paste0("These tissues are not in the plot: ",
+                                                      paste(tissues_not_in_plot, collapse = ", ")))
+  
+  
+  dendr <- dendro_data(dendro)
+  
+  
+  dendro_plot_data <- 
+    left_join(dendr$segments, 
+              dendr$labels, 
+              by = c("x" = "x", "yend" = "y")) 
+  
+  dendro_plot <- 
+    dendro_plot_data %>%
+    ggplot() +
+    geom_segment(aes(x=y, y=x, xend=yend, yend=xend, group = label))+
+    geom_rect(aes(xmin=0, ymin=x + 0.5, 
+                  xmax=-width, ymax=xend - 0.5, 
+                  fill = label), 
+              show.legend = F) +
+    scale_color_manual(values = pal)+
+    scale_fill_manual(values = pal)+
+    scale_x_reverse(expand = expand_scale(mult = 0.25))+
+    theme(axis.text.y = element_blank(), 
+          axis.title = element_blank(), 
+          axis.ticks.y = element_blank(),
+          plot.margin = unit(c(1,1,1,1), units = "mm"), 
+          panel.background = element_blank()) 
+
+  
+  
+  grid.arrange(dendro_plot, 
+               class_table_temp %>%
+                 filter(!is.na(enriched_tissues)) %>%
+                 group_by(enriched_tissues, spec_category) %>%
+                 summarise(n_genes = n()) %>%
+                 ungroup() %>%
+                 mutate(enriched_tissues = factor(enriched_tissues, levels = dendr$labels$label)) %>%
+                 ggplot(aes(enriched_tissues, n_genes, fill = spec_category)) +
+                 geom_col(width = 0.95, color = "white", size = 0.1) +
+                 simple_theme +
+                 scale_fill_manual(values = gene_category_pal, name = "Specificity") +
+                 coord_flip() +
+                 xlab("Tissue") +
+                 ylab("Number of genes") +
+                 scale_y_continuous(position = "bottom", expand = c(0,0)) + 
+                 
+                 theme(axis.text.y = element_text(hjust = 0.5), legend.position = c(0.7, 0.5)),
+               nrow = 1, 
+               widths = c(0.5, 1))
+  
+  
+}
+
 class_tissue_n_expressed_barplot <- function(class_table) {
 
   class_table_temp <-
@@ -610,7 +674,7 @@ pairwise_alluvial_plot <-
   }
 
 pairwise_subcat_alluvial_plot <- 
-  function(data, var1, var2, cat1, cat2, cat_levels, cat_names, pal, cat_pal) {
+  function(data, var1, var2, cat1, cat2, cat_levels, subcat, cat_names, weight = 1, pal, cat_pal) {
     
     
       
@@ -618,19 +682,36 @@ pairwise_subcat_alluvial_plot <-
     
     ####
     
+    
+    
+    if(is.character(weight)) {
+      alluv_data <-
+        data %>% 
+        select(var1 = var1, 
+               var2 = var2, 
+               cat1 = cat1, 
+               cat2 = cat2, 
+               subcat = subcat, 
+               weight = weight) 
+    } else {
+      alluv_data <-
+        data %>% 
+        
+        select(var1 = var1, 
+               var2 = var2, 
+               cat1 = cat1, 
+               cat2 = cat2, 
+               subcat = subcat) %>%
+        mutate(weight = weight)
+    }
+    
     alluv_1 <- 
-      data %>% 
-      
-      select(var1 = var1, 
-             var2 = var2, 
-             cat1 = cat1, 
-             cat2 = cat2, 
-             subcat = subcat) %>% 
+      alluv_data %>%
       mutate(cat1 = paste(cat1, subcat),
              cat2 = paste(cat2, subcat)) %>% 
       ungroup() %>%
       mutate(row_n = row_number()) %>%
-      gather(cat_type, cat, -var1, -var2, -row_n, -subcat) %>%
+      gather(cat_type, cat, -var1, -var2, -row_n, -subcat, -weight) %>%
       mutate(cat = factor(cat, levels = c(cat_levels)),
              cat_type = case_when(cat_type == "cat1" ~ cat_names[1],
                                   cat_type == "cat2" ~ cat_names[2]),
@@ -638,7 +719,7 @@ pairwise_subcat_alluvial_plot <-
                                levels = cat_names)) %>%
       
       ggplot(aes(x = cat_type, stratum = cat, alluvium = row_n,
-                 y = 1,
+                 y = weight,
                  fill = cat)) +
       scale_x_discrete(expand = c(.1, .1), position = "top") +
       geom_flow(show.legend = F) +
@@ -718,6 +799,217 @@ pairwise_subcat_alluvial_plot <-
     
     alluv_1
   }
+
+multi_alluvial_plot <- 
+  function(data, vars, chunk_levels, pal, color_by = c(1, 3, 3)) {
+    
+    selvars = vars
+    
+    if(!is.null(names(vars))) {
+      vars = names(vars)
+    }
+    
+    alluv_1 <-
+      data %>%
+      ungroup() %>%
+      select(selvars) %>% 
+      ungroup() %>%
+      mutate(row_n = row_number()) %>%
+      gather(bar, chunk, -row_n) %>%
+      left_join(tibble(bar = vars, 
+                       color_vars = color_by), 
+                by = "bar") %>% 
+      group_by(row_n) %>%
+      mutate(chunk_color = chunk[match(vars[color_vars], bar)]) %>% 
+      ungroup() %>%
+      
+      mutate(chunk = factor(chunk, levels = chunk_levels),
+             bar = factor(bar, levels = vars)) %>%
+      
+      
+      ggplot(aes(x = bar, stratum = chunk, alluvium = row_n,
+                 y = 1)) +
+      
+      geom_flow(aes(fill = chunk_color), 
+                show.legend = F) +
+      geom_stratum(aes(fill = chunk), 
+                   show.legend = F, color = NA) +
+      
+      scale_x_discrete(expand = c(.1, .1), position = "top") +
+      scale_fill_manual(values = pal) + 
+      
+      
+      theme(axis.text.x = element_text(size = 18, face = "bold"),
+            axis.text.y = element_blank(), 
+            axis.ticks = element_blank(), 
+            panel.background = element_blank(), 
+            axis.title = element_blank())
+    
+    
+    
+    flow_data <- 
+      ggplot_build(alluv_1)$data[[1]]  
+    
+    stratum_data <- 
+      ggplot_build(alluv_1)$data[[2]]
+    
+    flow_data_labels <-
+      flow_data %>% 
+      as_tibble() %>% 
+      select(x, stratum, group, side, ymin, ymax) %>% 
+      multispread(c(side), c(x, stratum, ymin, ymax)) %>% 
+      mutate_at(c("end_x", "end_ymax", "end_ymin", "start_x", "start_ymax", "start_ymin"), as.numeric) %>% 
+      group_by(start_stratum, end_stratum, start_x, end_x) %>%
+      summarise(end_y = (min(end_ymin) + max(end_ymax)) / 2, 
+                start_y = (min(start_ymin) + max(start_ymax)) / 2, 
+                size = max(start_ymax) - min(start_ymin))
+    alluv_1 <- 
+      alluv_1 +
+      geom_text(data = flow_data_labels,
+                aes(x = start_x + 1/6,
+                    y = start_y, 
+                    label = size), 
+                inherit.aes = F, 
+                size = 3, 
+                hjust = 0) +
+      geom_text(data = flow_data_labels,
+                aes(x = end_x - 1/6,
+                    y = end_y, 
+                    label = size), 
+                inherit.aes = F, 
+                size = 3, 
+                hjust = 1) +
+      
+      # Stratum label
+      
+      geom_text(data = stratum_data,
+                aes(x = x, 
+                    y = y,
+                    label = paste(stratum, 
+                                  ymax - ymin, sep = "\n")), 
+                size = 4, 
+                inherit.aes = F)
+    
+    
+    alluv_1
+  }
+
+# ----- Misc plots -----
+
+pie_plot <- 
+  function(plot_data, class_col, y_col, pal, dodge = 0.1){
+    plot_data_ <- 
+      plot_data %>%
+      rename(class = class_col, 
+             y = y_col)
+    
+    if(!is.factor(plot_data$term)) {
+      plot_data_ <- 
+        plot_data_ %>%
+        mutate(class = factor(class))
+    }
+    plot_data_ %>% 
+      arrange(match(class, rev(levels(class)))) %>% 
+      mutate(y_stack = cumsum(y) - y/2) %>% 
+      {ggplot(., aes(1, y, fill = class, group = class, label = paste0(class, "\n", round(y * 100, 1), " %"))) +
+          geom_col(show.legend = F, 
+                   color = "white", 
+                   width = 1) + 
+          geom_segment(aes(x = 1.5 + dodge, xend = 1.5, 
+                           y = y_stack, yend = y_stack), size = 0.5) +
+          geom_text_repel(aes(x = 1.5 + dodge, y = y_stack), 
+                          color = "black", nudge_x = dodge, 
+                          segment.size = 0.5) +
+          scale_fill_manual(values = pal) + 
+          coord_polar("y") +
+          theme_void() + 
+          scale_x_continuous(expand = expand_scale(c(0,0.8)))}
+  }
+
+pie_plot_facet <- 
+  function(plot_data, class_col, y_col, facet_col, pal, dodge = 0.1){
+    plot_data_ <- 
+      plot_data %>%
+      rename(class = class_col, 
+             y = y_col, 
+             facet = facet_col)
+    
+    if(!is.factor(plot_data$term)) {
+      plot_data_ <- 
+        plot_data_ %>%
+        mutate(class = factor(class))
+    }
+    
+    plot_data_ %>% 
+      arrange(match(class, rev(levels(class)))) %>% 
+      group_by(facet) %>%
+      mutate(y_stack = cumsum(y) - y/2) %>% 
+      {ggplot(., aes(1, y, fill = class, group = class, label = paste0(class, "\n", round(y * 100, 1), " %"))) +
+          geom_col(show.legend = F, 
+                   color = "white", 
+                   width = 1) + 
+          geom_segment(aes(x = 1.5 + dodge, xend = 1.5, 
+                           y = y_stack, yend = y_stack), size = 0.5) +
+          geom_text_repel(aes(x = 1.5 + dodge, y = y_stack), 
+                          color = "black", nudge_x = dodge, 
+                          segment.size = 0.5) +
+          scale_fill_manual(values = pal) + 
+          
+          facet_wrap(~facet) +
+          
+          coord_polar("y") +
+          theme_void() + 
+          scale_x_continuous(expand = expand_scale(c(0,0.8)))}
+  }
+
+
+scatter_cor_plot <- 
+  function(plot_data, 
+           val1 = "nx_human", val2 = "nx_pig", 
+           lab1 = "ensg_id", lab2 = "enssscg_id", 
+           color_col = "region_tissue_name", 
+           pal) {
+    
+    plot_data_ <- 
+      plot_data %>% 
+      rename(val1 = val1, 
+             val2 = val2, 
+             lab1 = lab1, 
+             lab2 = lab2, 
+             color = color_col) 
+    
+    cor_data_ <-
+      plot_data_ %>% 
+      group_by(lab1, lab2) %>% 
+      summarise(cor_s = cor(val1, val2, method = "spearman", use = "pairwise.complete.obs"),
+                cor_p = cor(log10(val1 + 1), log10(val2 + 1), method = "pearson", use = "pairwise.complete.obs"), 
+                max_val = log10(max(c(val1, val2)) + 1),
+                min_val = log10(min(c(val1, val2)) + 1))
+    
+    plot_data_ %>%
+      
+      {ggplot(., aes(log10(val1 + 1), log10(val2 + 1))) + 
+          geom_point(aes(color = color), 
+                     show.legend = F) + 
+          geom_smooth(method = "lm", color = "black", fill = NA) +
+          geom_abline(slope = 1) +
+          geom_text(data = cor_data_,
+                    aes(label = paste0("spearman ", round(cor_s, 2), "\n",
+                                       "pearson ", round(cor_p, 2)),
+                        x = min_val, y = max_val), 
+                    hjust = 0, vjust = 1) +
+          # facet_grid("Human" + gene_name_human ~ "Pig" + gene_name_pig) + 
+          facet_grid(~ lab1 + lab2) + 
+          xlab(paste0("log10(", lab1, " + 1)")) + 
+          ylab(paste0("log10(", lab2, " + 1)")) + 
+          stripped_theme_facet + 
+          theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+          scale_color_manual(values = pal) + 
+          scale_x_continuous(limits = log10(c(min(.$val1, .$val2), max(.$val1, .$val2)) + 1)) +
+          scale_y_continuous(limits = log10(c(min(.$val1, .$val2), max(.$val1, .$val2)) + 1)) +
+          coord_fixed()}
+  }
+
 # ----- tissue clustering plots -----
 
 evolutionary_tree_plot <- function(data,
@@ -1224,6 +1516,166 @@ label_unique <-  function (labels) {
 
 # ----- Atlas Demo Plots -----
 
+ortholog_connection_plot <- 
+  function(orth_connection_data, example_gene) {
+    example_community <- 
+      orth_connection_data %>% 
+      filter(enssscg_id == example_gene | ensg_id == example_gene) %>% 
+      pull(community) %>% 
+      unique()
+    
+    connection_data <- 
+      orth_connection_data %>% 
+      filter(community == example_community) %>% 
+      mutate(human_label = ifelse(is.na(human_gene_name), 
+                                  ensg_id, 
+                                  human_gene_name),
+             pig_label = ifelse(is.na(pig_gene_name), 
+                                enssscg_id, 
+                                pig_gene_name),
+             
+             left_id = case_when(grepl("^ENSG", example_gene) ~ ensg_id,
+                                 grepl("^ENSSSCG", example_gene) ~ enssscg_id),
+             right_id = case_when(grepl("^ENSG", example_gene) ~ enssscg_id,
+                                  grepl("^ENSSSCG", example_gene) ~ ensg_id),
+             
+             selected_gene = example_gene == enssscg_id | example_gene == ensg_id, 
+             selected_primary = selected_gene & ((grepl("^ENSG", example_gene) & 
+                                                    ortholog_class_human == "primary") |
+                                                   (grepl("^ENSSSCG", example_gene) & 
+                                                      ortholog_class_pig == "primary")),
+             
+             left_factor = unclass(factor(left_id, levels = unique(left_id[order(expression_identity)]))),
+             right_factor = unclass(factor(right_id, levels = unique(right_id[order(expression_identity)]))),
+             
+             primary_ortholog_direction = case_when(mutual_primary ~ 0,
+                                                    
+                                                    grepl("^ENSG", example_gene) & 
+                                                      ortholog_class_human == "primary" &
+                                                      ortholog_class_pig == "secondary" ~ 1,
+                                                    grepl("^ENSG", example_gene) & 
+                                                      ortholog_class_human == "secondary" &
+                                                      ortholog_class_pig == "primary" ~ -1,
+                                                    
+                                                    grepl("^ENSSSCG", example_gene) & 
+                                                      ortholog_class_human == "primary" &
+                                                      ortholog_class_pig == "secondary" ~ -1,
+                                                    grepl("^ENSSSCG", example_gene) & 
+                                                      ortholog_class_human == "secondary" &
+                                                      ortholog_class_pig == "primary" ~ 1),
+             
+             left_y = scales::rescale(left_factor, 
+                                      c(1, unique(community_size))),
+             right_y = scales::rescale(right_factor, 
+                                       c(1, unique(community_size))), 
+             
+             
+             left_label = case_when(grepl("^ENSG", example_gene) ~ human_label,
+                                    grepl("^ENSSSCG", example_gene) ~ pig_label),
+             right_label = case_when(grepl("^ENSG", example_gene) ~ pig_label,
+                                     grepl("^ENSSSCG", example_gene) ~ human_label))
+    
+    connection_data_primary <- 
+      connection_data %>% 
+      filter(selected_primary)
+    
+    connection_data %>%
+      ggplot() + 
+      
+      geom_segment(aes(x = 1, xend = 2, 
+                       y = left_y, 
+                       yend= right_y, 
+                       linetype = ortholog_confidence,
+                       # size = expression_identity, 
+                       color = selected_primary),
+                   # size = 1,
+                   inherit.aes = F, 
+                   show.legend = F, 
+                   
+                   arrow = arrow(length = case_when(is.na(connection_data$primary_ortholog_direction) ~ 0, 
+                                                    T ~ 0.1) %>% 
+                                   unit("inches"),
+                                 
+                                 ends = with(connection_data, 
+                                             case_when(primary_ortholog_direction == 0 ~ "both", 
+                                                       primary_ortholog_direction == -1 ~ "first", 
+                                                       primary_ortholog_direction == 1 ~ "last", 
+                                                       T ~ "first")), 
+                                 type = "open")) + 
+      
+      geom_segment(data = connection_data_primary,
+                   aes(x = 1, xend = 2, 
+                       y = left_y, 
+                       yend= right_y, 
+                       linetype = ortholog_confidence,
+                       # size = expression_identity, 
+                       color = selected_primary),
+                   # size = 1,
+                   inherit.aes = F, 
+                   show.legend = F, 
+                   
+                   arrow = arrow(length = case_when(is.na(connection_data_primary$primary_ortholog_direction) ~ 0, 
+                                                    T ~ 0.1) %>% 
+                                   unit("inches"),
+                                 
+                                 ends = with(connection_data_primary, 
+                                             case_when(primary_ortholog_direction == 0 ~ "both", 
+                                                       primary_ortholog_direction == -1 ~ "first", 
+                                                       primary_ortholog_direction == 1 ~ "last", 
+                                                       T ~ "first")), 
+                                 type = "open")) + 
+      
+      geom_text(data = connection_data %>% 
+                  select(left_label, left_id, left_y, selected_gene) %>% 
+                  group_by(left_label, left_id) %>% 
+                  summarise(left_y = unique(left_y), 
+                            selected_gene = any(selected_gene)),
+                
+                aes(x = 1, y = left_y, 
+                    label = left_label, 
+                    color = selected_gene), 
+                show.legend = F, 
+                hjust = 1.1) + 
+      
+      geom_text(data = connection_data %>% 
+                  select(right_label, right_id, right_y, selected_primary) %>% 
+                  group_by(right_label, right_id) %>% 
+                  summarise(right_y = unique(right_y), 
+                            selected_primary = any(selected_primary)),
+                aes(x = 2, y = right_y, 
+                    label = right_label, 
+                    color = selected_primary), 
+                show.legend = F, 
+                hjust = -0.1) + 
+      
+      
+      geom_point(data = connection_data,
+                 aes(x = 1.5, y = (left_y + right_y) / 2, 
+                     color = selected_gene), 
+                 show.legend = F, 
+                 fill = "white",
+                 shape = 21,
+                 size = 8) + 
+      
+      geom_text(data = connection_data,
+                aes(x = 1.5, y = (left_y + right_y) / 2, 
+                    label = round(expression_identity * 100, 1), 
+                    color = selected_gene), 
+                show.legend = F, 
+                size = 3,
+                hjust = 0.5,
+                vjust = 0.45) + 
+      
+      
+      theme_void() +
+      stripped_theme_HPA + 
+      
+      scale_linetype_manual(values = c("1" = "solid", "0" = "dashed")) +
+      scale_x_continuous(expand = expand_scale(mult = 0.9)) + 
+      scale_color_manual(values = c("TRUE" = "black", "FALSE" = "gray")) +
+      scale_size_continuous(range = c(1, 2), limits = 0:1)
+  }
+
 plot_ortholog_pair <- 
   function(pig_id, human_id) {
     
@@ -1411,6 +1863,60 @@ ortholog_network_plot <-
     
   }
 
+ortholog_heatmap <- 
+  function(ortholog_connection_data, gene, species) {
+    
+    
+    
+    plot_data <- 
+      ortholog_connection_data %>% 
+      rename(pig = 1, 
+             human = 2) %>%
+      mutate(selected_species = eval(parse(text = species)))  %>%
+      
+      # Get edges in community of selected gene
+      filter(community == .$community[match(gene, selected_species)]) %>%
+      left_join(orth_region, 
+                by = c("pig" = "enssscg_id", 
+                       "human" = "ensg_id")) %>% 
+      left_join(gene_mapping %>% 
+                  select(gene = 1, 
+                         name = 2), 
+                by = c("pig" = "gene")) %>% 
+      left_join(human_gene_mapping %>% 
+                  select(gene = 1, 
+                         name = 2), 
+                by = c("human" = "gene"), 
+                suffix = c("_pig", "_human")) %>% 
+      mutate(gene_name_pig = case_when(name_pig == "NULL" ~ pig, 
+                                       T ~ paste(name_pig,  "-",  pig)),
+             gene_name_human = case_when(name_human == "NULL" ~ human, 
+                                         T ~ paste(name_human,  "-",  human)))
+    
+    plot_data2 <- 
+      plot_data %>% 
+      select(nx_pig, nx_human, gene_name_human, gene_name_pig, region_tissue_name) %>% 
+      gather(species, nx, 1:2) %>% 
+      mutate(species = gsub("nx_", "", species),
+             gene_name = ifelse(species == "pig", gene_name_pig, gene_name_human))  
+      
+    plot_data2 %>% 
+      select(region_tissue_name, nx, gene_name) %>% 
+      mutate(nx = log10(nx + 1)) %>%
+      unique() %>%
+      spread(gene_name, nx) %>% 
+      column_to_rownames("region_tissue_name") %>% 
+      pheatmap(color = heatmap_palette, 
+               clustering_method = "ward.D2", 
+               annotation_col = plot_data2 %>% 
+                 select(gene_name, species) %>% 
+                 unique() %>% 
+                 column_to_rownames("gene_name"))
+    
+    
+    
+    
+  }
 
 ortholog_barplot <- 
   function(ortholog_connection_data, gene, species) {
@@ -1563,6 +2069,38 @@ ortholog_metrics <-
              }) %>% 
       set_names(unique(plot_data$human))
     
+  }
+
+quick_atlas_barplot <- 
+  function(data, 
+           tis_col = "comparison_tissue", exp_col = "nx", 
+           gene_name_col = "gene_name", gene_id_col = "species_gene_id") {
+    data %>%
+      rename(tissue = tis_col, 
+             exp = exp_col, 
+             gene_name = gene_name_col, 
+             species_gene_id = gene_id_col) %>%
+      ggplot(aes(tissue, 
+                 exp,
+                 fill = tissue)) + 
+      geom_col(show.legend = F) + 
+      facet_wrap(~ paste(gene_name, "-", species_gene_id), ncol = 1) +
+      stripped_theme_facet + 
+      theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+      scale_fill_manual(values = tissue_colors_palette_full_humanpig)
+  }
+
+quick_atlas_fishboneplot <- 
+  function(data) {
+    data %>%
+      ggplot(aes(comparison_tissue, 
+                 nx,
+                 fill = comparison_tissue)) + 
+      geom_col(show.legend = F) + 
+      facet_wrap(~ paste(gene_name, "-", species_gene_id), ncol = 1) +
+      stripped_theme_facet + 
+      theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+      scale_fill_manual(values = tissue_colors_palette_full_humanpig)
   }
 # ----- Not currently in use -----
 

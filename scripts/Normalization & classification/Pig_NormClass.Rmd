@@ -1532,8 +1532,372 @@ g +
 
 
 
-##Classification based on gene variance
+##Classification by gene variance
 
+```{r gene_variance_class, echo=FALSE, message=FALSE, warning=FALSE}
+
+var_class_res <- 
+  bind_rows(pig_atlas_comparison %>% 
+              select(gene = enssscg_id, comparison_tissue, tmm) %>% 
+              mutate(species = "Pig"),
+            human_atlas_comparison %>% 
+              select(gene = ensg_id, comparison_tissue, tmm) %>%
+              mutate(species = "Human")) %>% 
+  mutate(log_tmm = log10(tmm + 1)) %>%
+  group_by(species, gene) %>%
+  mutate(sd_log = sd(log_tmm, na.rm = T), 
+         mean_log = mean(log_tmm, na.rm = T), 
+         max = max(tmm, na.rm = T)) %>% 
+  ungroup() %>% 
+  mutate(limit = mean_log + 2 * sd_log, 
+         over_limit = log_tmm > limit) 
+
+var_class_res %>%
+  group_by(species, comparison_tissue, over_limit) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  mutate(comparison_tissue = factor(comparison_tissue, 
+                                    levels = {filter(., species == "Human" & over_limit) %$%
+                                        unique(comparison_tissue[order(n)])})) %>%
+  ggplot(aes(species, n, fill = over_limit)) + 
+  geom_col() + 
+  
+  facet_wrap(~comparison_tissue, nrow = 1) +
+  
+  # scale_fill_manual(values = tissue_colors_palette) + 
+  
+  stripped_theme_facet + 
+  theme(panel.spacing = unit(0, "cm"),
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        strip.text.x = element_text(angle = 90))
+
+var_gene_class <- 
+  var_class_res %>% 
+  
+  group_by(species, gene) %>%
+  summarise(n_enriched = length(which(over_limit)),
+            enriched_tissues = paste(sort(comparison_tissue[which(over_limit)]), collapse = ";"),
+            detected = unique(max) >= 1, 
+            enrichment_score = ifelse(any(over_limit),
+                                      mean(tmm[which(over_limit)]) / max(tmm[which(!over_limit)]),
+                                      NA)) %>%
+  ungroup() %>%
+  mutate(specificity_category = case_when(!detected ~ "Not detected", 
+                                          n_enriched == 0 ~ "Low tissue specificity",
+                                          n_enriched == 1 ~ "Tissue enriched",
+                                          n_enriched > 1 ~ "Group enriched"),
+         enriched_tissues = ifelse(enriched_tissues == "", NA, enriched_tissues))
+
+var_gene_class
+
+```
+
+###Compare gene variance class
+
+```{r compare_gene_var_class, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+
+
+human_pig_var_comparison_long <- 
+  full_join(gene_orthologs %>% 
+              left_join(var_gene_class %>% 
+                          separate_rows(enriched_tissues, sep = ";") %>%
+                          filter(species == "Human") %>%
+                          select(ensg_id = gene,
+                                 enriched_tissues, 
+                                 spec_category = specificity_category, 
+                                 enrichment_score), 
+                        by = "ensg_id") %>% 
+              mutate(comparison_id = enriched_tissues),
+            
+            
+            gene_orthologs %>% 
+              left_join(var_gene_class %>% 
+                          separate_rows(enriched_tissues, sep = ";") %>%
+                          filter(species == "Pig") %>%
+                          select(enssscg_id = gene,
+                                 enriched_tissues,
+                                 spec_category = specificity_category,
+                                 enrichment_score), 
+                        by = "enssscg_id") %>% 
+              mutate(comparison_id = enriched_tissues),
+            by = c("enssscg_id", "ensg_id", "ortholog_type", "comparison_id"), 
+            suffix = c("_human", "_pig")) %>% 
+  select(1, 2, 3, enriched_tissues_human, enriched_tissues_pig, comparison_id, everything()) 
+
+         
+
+         
+         
+human_pig_var_comparison <- 
+  human_pig_var_comparison_long %>% 
+  group_by(enssscg_id, ensg_id, ortholog_type, 
+           spec_category_human, spec_category_pig, 
+           enrichment_score_human, enrichment_score_pig) %>% 
+  summarise(n_enriched_human = n_distinct(enriched_tissues_human, na.rm = T),
+            n_enriched_pig = n_distinct(enriched_tissues_pig, na.rm = T),
+            
+            
+            # Tissues count as overlapping if enriched in both human and pig, and the tissue is common in both datasets
+            n_enriched_overlap = length(which((!is.na(enriched_tissues_human) & !is.na(enriched_tissues_pig)))),
+            n_enriched_total = n_enriched_human + n_enriched_pig - n_enriched_overlap,
+            
+            enriched_tissues_overlap = paste(comparison_id[which(!is.na(enriched_tissues_human) & !is.na(enriched_tissues_pig))], 
+                                             collapse = ";"),
+            enriched_tissues_human = paste(enriched_tissues_human[which(!is.na(enriched_tissues_human))], 
+                                           collapse = ";"),
+            enriched_tissues_pig = paste(enriched_tissues_pig[which(!is.na(enriched_tissues_pig))], 
+                                         collapse = ";"),
+            
+            enrichment_overlap = case_when(n_enriched_overlap == 0 ~ "no overlap", #n_enriched_total == 0 ~ "no enrichment", 
+                                           n_enriched_overlap == n_enriched_total ~ "full overlap",
+                                           n_enriched_overlap > 0 ~ "partial overlap")
+            ) %>% 
+  ungroup()
+
+```
+
+```{r compare_var_class_plots, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+gene_var_overlap_data <- 
+  human_pig_var_comparison_long %>% 
+  filter(ortholog_type == "ortholog_one2one") %>%
+  filter(!is.na(comparison_id)) %>%
+  
+  group_by(comparison_id, enssscg_id, ensg_id, 
+           enrichment_score_pig, enrichment_score_human, 
+           spec_category_pig, spec_category_human) %>%
+  summarise(type = case_when(any(!is.na(enriched_tissues_human) & 
+                                   !is.na(enriched_tissues_pig)) ~ "Overlap",
+                             all(is.na(enriched_tissues_human)) ~ "Pig", 
+                             all(is.na(enriched_tissues_pig)) ~ "Human")) %>%
+  ungroup()
+
+
+gene_var_overlap_data %>% 
+  group_by(comparison_id, type) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {
+                                  filter(., type == "Overlap") %$%
+                                    comparison_id[order(n)]
+                                })) %>%
+  ggplot() + 
+  geom_col(mapping = aes(comparison_id, n,fill = type)) + 
+  
+  geom_text(data = . %>% 
+              filter(type == "Pig"),
+            aes(x = comparison_id, y = 0,
+                label = n), 
+            hjust = 1) +
+  geom_text(data = . %>% 
+              group_by(comparison_id) %>%
+              summarise(y = n[which(type == "Overlap")] / 2 + 
+                          n[which(type == "Pig")], 
+                        label = n[which(type == "Overlap")]),
+            aes(x = comparison_id, y = y,
+                label = label), 
+            hjust = 0.5, 
+            color = "white") +
+  geom_text(data = . %>% 
+              group_by(comparison_id) %>%
+              summarise(y = sum(n), 
+                        label = n[which(type == "Human")]),
+            aes(x = comparison_id, y = y,
+                label = label), 
+            hjust = 0) +
+  
+  coord_flip() + 
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_y_continuous(expand = expand_scale(0.13)) +
+  
+  theme(axis.text.y = element_text(face = "bold"), 
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(),
+        
+        legend.position = c(0.5, 0.5))
+ggsave(savepath("enrichment overlap varclassed genes barplot.pdf"), width= 5, height = 8)
+
+
+gene_var_overlap_data %>% 
+  mutate(enrichment_score = case_when(type == "Overlap" ~ (enrichment_score_human + enrichment_score_pig) / 2,
+                                      type == "Human" ~ enrichment_score_human,
+                                      type == "Pig" ~ enrichment_score_pig)) %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {filter(., type == "Overlap") %>%
+                                    group_by(comparison_id) %>%
+                                    summarise(enrichment_score = median(enrichment_score)) %$%
+                                    comparison_id[order(enrichment_score)]})) %>%
+  ggplot(aes(type, enrichment_score ,fill = type)) + 
+  
+  geom_violin(draw_quantiles = 0.5, 
+              scale = "width", 
+              color = "white") +
+  
+  coord_flip() +
+  facet_wrap(~comparison_id, ncol = 1, strip.position = "left") +
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_y_log10() +
+  
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        strip.background = element_rect(fill = "white"),
+        strip.text.y = element_text(hjust = 1, face = "bold", angle = 180))
+ggsave(savepath("enrichment score overlap varclassed genes violinplot.pdf"), width= 5, height = 10)
+
+plot_data <- 
+  gene_var_overlap_data %>% 
+  mutate(enrichment_score = case_when(type == "Overlap" ~ (enrichment_score_human + enrichment_score_pig) / 2,
+                                      type == "Human" ~ enrichment_score_human,
+                                      type == "Pig" ~ enrichment_score_pig)) %>%
+  group_by(comparison_id, type) %>% 
+  do({
+    g_data <- .
+    saved_data <<- g_data
+    
+    
+    summary(g_data$enrichment_score) %>% 
+      enframe("metric", "value") 
+  }) %>%
+  ungroup() %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {filter(., type == "Overlap" & metric == "Median") %$%
+                                    comparison_id[order(value)]})) %>%
+  mutate(order = unclass(comparison_id) * case_when(metric == "1st Qu." ~ -1, 
+                                                    metric == "Median" ~ 0, 
+                                                    metric == "3rd Qu." ~ 1)) %>%
+  arrange(order) %>%
+  filter(metric %in% c("1st Qu.", "Median", "3rd Qu.")) 
+
+plot_data %>%
+  # filter(metric %in% c("Median")) %>%
+  ggplot(aes(comparison_id, value, fill = type, color = type)) + 
+  geom_polygon(data = . %>%
+                 filter(!metric %in% c("Median")),
+                 aes(group = paste(type)),
+               alpha = 0.1, 
+               color = NA) +
+  
+  geom_point(data = . %>%
+                 filter(metric %in% c("Median"))) +
+  geom_line(data = . %>%
+                 filter(metric %in% c("Median")),
+            aes(group = type)) +
+  
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_color_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_linetype_manual(values = c("1st Qu." = "dashed", "Median" = "solid", "3rd Qu." = "dashed")) +
+  scale_y_log10() +
+  
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.ticks = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        strip.background = element_rect(fill = "white"),
+        strip.text.y = element_text(hjust = 1, face = "bold", angle = 180))
+ggsave(savepath("enrichment score overlap varclassed genes median lineplot.pdf"), width= 8, height = 5)
+
+```
+
+##Bland Altman comparison
+
+```{r BA_analysis, echo=FALSE, message=FALSE, warning=FALSE}
+
+BA_comparison_data <- 
+  joined_species_atlas_comparison %>% 
+  gather(type, value, -1, -2) %>% 
+  mutate(value = round(value, 4)) %>%
+  mutate(species = str_extract(type, "^human|^pig"), 
+         normed = grepl("_norm_", type), 
+         value = log10(value + 1)) %>% 
+  select(-type) %>% 
+  spread(species, value) %>% 
+  filter(complete.cases(.)) %>%
+  group_by(mutual_id, normed) %>%
+  mutate(diff = human - pig, 
+         mean_diff = mean(diff), 
+         mean = (human + pig) / 2,
+         sd_diff = sd(diff), 
+         upper_lim = mean_diff + 1.96 * sd_diff,
+         lower_lim = mean_diff - 1.96 * sd_diff, 
+         in_limit = diff > lower_lim & diff < upper_lim) %>% 
+  ungroup()
+
+BA_comparison_data %>% 
+  ggplot(aes(mean, diff / sd_diff)) +
+  geom_hex(aes(alpha = stat(log10(count)), 
+               fill = in_limit), 
+           show.legend = F,
+           bins = 100) +
+  # scale_fill_viridis() +
+  scale_x_log10() +
+  stripped_theme_facet + 
+  facet_wrap(~ normed)
+
+
+human_pig_fit <- 
+  lm(log10(value + 1) ~ comparison_tissue + species, 
+     data = joined_species_atlas_comparison %>% 
+       gather(type, value, -1, -2) %>% 
+       mutate(value = round(value, 4)) %>%
+       mutate(species = str_extract(type, "^human|^pig"), 
+              normed = grepl("_norm_", type), 
+              value = log10(value + 1)) %>% 
+       select(-type) %>% 
+       filter(!normed))
+
+BA_comparison_data %>%
+  filter(!normed) %>%
+  filter(mutual_id %in% sample(unique(mutual_id), 9)) %>%
+  ggplot(aes(mean, diff, color = in_limit, fill = comparison_tissue)) + 
+  
+  geom_hline(data = . %>% 
+               select(mutual_id, mean_diff, upper_lim, lower_lim) %>%
+               gather(line, y, -1), 
+             aes(yintercept = y, 
+                 linetype = line)) +
+  geom_point(show.legend = F, 
+             shape = 21) + 
+  
+  # scale_x_log10() + 
+  scale_fill_manual(values = tissue_colors_palette_full) +
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" = "red")) +
+  scale_linetype_manual(values = c("mean_diff" = "solid", "upper_lim" = "dashed", "lower_lim" = "dashed")) +
+  
+  stripped_theme_facet + 
+  
+  facet_wrap(~ mutual_id, scales = "free")
+ggsave(savepath("BA pig human examples.pdf"), width = 8, height = 10)
+
+BA_comparison_data %>% 
+  filter(!normed) %>%
+  group_by(comparison_tissue, in_limit) %>% 
+  summarise(n = n()) %>% 
+  group_by(comparison_tissue) %>%
+  mutate(fract = n[which(in_limit)] / 
+           (sum(n))) %>%
+  ungroup() %>%
+  mutate(comparison_tissue = factor(comparison_tissue, 
+                                    levels = unique(comparison_tissue[order(fract)]))) %>%
+  ggplot(aes(comparison_tissue, n, fill = in_limit)) + 
+  geom_col() + 
+  stripped_theme +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+ggsave(savepath("BA pig human number genes.pdf"), width = 8, height = 3)
+
+```
 
 
 # Clustering plots
@@ -1710,6 +2074,19 @@ orth_all_region %>%
                          cor_method = "spearman", 
                          p_adjust_method = "BH", 
                          alternative = "greater")
+
+cor_s_gene_all_orth_all_region_adjusted <-
+orth_all_region %>% 
+  mutate(nx_pig = round(nx_pig, 2),
+         nx_human = round(nx_human, 2)) %>%
+  calc_gene_correlations(var1 = "enssscg_id", 
+                         var2 = "ensg_id", 
+                         val1 = "nx_pig", 
+                         val2 = "nx_human", 
+                         cor_method = "spearman", 
+                         p_adjust_method = "BH", 
+                         alternative = "greater")
+
 
 cor_p_gene_all_orth_region <- 
   orth_region %>% 
@@ -2090,7 +2467,9 @@ human_pig_gene_class_comparison_long <-
               left_join(human_gene_class_comparison %>%
                           separate_rows(enriched_tissues, sep = ";") %>% 
                           select(ensg_id = gene,
-                                 enriched_tissues), 
+                                 enriched_tissues, 
+                                 spec_score, 
+                                 spec_category), 
                         by = "ensg_id") %>% 
               mutate(comparison_id = enriched_tissues),
             
@@ -2099,12 +2478,14 @@ human_pig_gene_class_comparison_long <-
               left_join(pig_gene_class_comparison %>%
                           separate_rows(enriched_tissues, sep = ";") %>% 
                           select(enssscg_id = gene,
-                                 enriched_tissues), 
+                                 enriched_tissues, 
+                                 spec_score, 
+                                 spec_category), 
                         by = "enssscg_id") %>% 
               mutate(comparison_id = enriched_tissues),
             by = c("enssscg_id", "ensg_id", "ortholog_type", "comparison_id"), 
             suffix = c("_human", "_pig")) %>% 
-  select(1, 2, 3, enriched_tissues_human, enriched_tissues_pig, comparison_id) 
+  select(1, 2, 3, enriched_tissues_human, enriched_tissues_pig, comparison_id, everything()) 
 
          
 
@@ -2499,7 +2880,344 @@ plot_data_2 %>%
 
 ```
 
-### All orthologs
+##Elevation overlap venn
+
+```{r elevation_overlap_venn, echo=FALSE, message=FALSE, warning=FALSE}
+gene_overlap_data <- 
+  human_pig_gene_class_comparison_long %>% 
+  filter(ortholog_type == "ortholog_one2one") %>%
+  left_join(human_gene_class_comparison %>%
+              select(1:2),
+            by = c("ensg_id" = "gene")) %>%
+  left_join(pig_gene_class_comparison %>%
+              select(1:2),
+            by = c("enssscg_id" = "gene"), 
+            suffix = c("_human", "_pig")) %>%
+  filter(!is.na(comparison_id)) %>%
+  
+  group_by(comparison_id, enssscg_id, ensg_id, spec_score_human, spec_score_pig) %>%
+  summarise(type = case_when(any(!is.na(enriched_tissues_human) & 
+                                   !is.na(enriched_tissues_pig)) ~ "Overlap",
+                             all(is.na(enriched_tissues_human)) ~ "Pig", 
+                             all(is.na(enriched_tissues_pig)) ~ "Human")) %>%
+  ungroup()
+
+
+gene_overlap_data %>% 
+  group_by(comparison_id, type) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {
+                                  filter(., type == "Overlap") %$%
+                                    comparison_id[order(n)]
+                                })) %>%
+  ggplot() + 
+  geom_col(mapping = aes(comparison_id, n,fill = type)) + 
+  
+  geom_text(data = . %>% 
+              filter(type == "Pig"),
+            aes(x = comparison_id, y = 0,
+                label = n), 
+            hjust = 1) +
+  geom_text(data = . %>% 
+              group_by(comparison_id) %>%
+              summarise(y = n[which(type == "Overlap")] / 2 + 
+                          n[which(type == "Pig")], 
+                        label = n[which(type == "Overlap")]),
+            aes(x = comparison_id, y = y,
+                label = label), 
+            hjust = 0.5, 
+            color = "white") +
+  geom_text(data = . %>% 
+              group_by(comparison_id) %>%
+              summarise(y = sum(n), 
+                        label = n[which(type == "Human")]),
+            aes(x = comparison_id, y = y,
+                label = label), 
+            hjust = 0) +
+  
+  coord_flip() + 
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_y_continuous(expand = expand_scale(0.13)) +
+  
+  theme(axis.text.y = element_text(face = "bold"), 
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(),
+        
+        legend.position = c(0.5, 0.5))
+ggsave(savepath("enrichment overlap barplot.pdf"), width= 5, height = 8)
+
+
+####
+gene_overlap_data %>% 
+  mutate(enrichment_score = case_when(type == "Overlap" ~ (spec_score_human + spec_score_pig) / 2,
+                                      type == "Human" ~ spec_score_human,
+                                      type == "Pig" ~ spec_score_pig)) %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {filter(., type == "Overlap") %>%
+                                    group_by(comparison_id) %>%
+                                    summarise(enrichment_score = median(enrichment_score)) %$%
+                                    comparison_id[order(enrichment_score)]})) %>%
+  ggplot(aes(type, enrichment_score ,fill = type)) + 
+  
+  geom_violin(draw_quantiles = 0.5, 
+              scale = "width", 
+              color = "white") +
+  
+  coord_flip() +
+  facet_wrap(~comparison_id, ncol = 1, strip.position = "left") +
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_y_log10() +
+  
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        strip.background = element_rect(fill = "white"),
+        strip.text.y = element_text(hjust = 1, face = "bold", angle = 180))
+ggsave(savepath("enrichment score overlap class violinplot.pdf"), width= 5, height = 10)
+
+plot_data <- 
+  gene_overlap_data %>% 
+  mutate(enrichment_score = case_when(type == "Overlap" ~ (spec_score_human + spec_score_pig) / 2,
+                                      type == "Human" ~ spec_score_human,
+                                      type == "Pig" ~ spec_score_pig)) %>%
+  group_by(comparison_id, type) %>% 
+  do({
+    g_data <- .
+    saved_data <<- g_data
+    
+    
+    summary(g_data$enrichment_score) %>% 
+      enframe("metric", "value") 
+  }) %>%
+  ungroup() %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {filter(., type == "Overlap" & metric == "Median") %$%
+                                    comparison_id[order(value)]})) %>%
+  mutate(order = unclass(comparison_id) * case_when(metric == "1st Qu." ~ -1, 
+                                                    metric == "Median" ~ 0, 
+                                                    metric == "3rd Qu." ~ 1)) %>%
+  arrange(order) %>%
+  filter(metric %in% c("1st Qu.", "Median", "3rd Qu.")) 
+
+plot_data %>%
+  # filter(metric %in% c("Median")) %>%
+  ggplot(aes(comparison_id, value, fill = type, color = type)) + 
+  geom_polygon(data = . %>%
+                 filter(!metric %in% c("Median")),
+                 aes(group = paste(type)),
+               alpha = 0.1, 
+               color = NA) +
+  
+  geom_point(data = . %>%
+                 filter(metric %in% c("Median"))) +
+  geom_line(data = . %>%
+                 filter(metric %in% c("Median")),
+            aes(group = type)) +
+  
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_color_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_linetype_manual(values = c("1st Qu." = "dashed", "Median" = "solid", "3rd Qu." = "dashed")) +
+  scale_y_log10() +
+  
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.ticks = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        strip.background = element_rect(fill = "white"),
+        strip.text.y = element_text(hjust = 1, face = "bold", angle = 180))
+ggsave(savepath("enrichment score overlap class median lineplot.pdf"), width= 8, height = 5)
+
+```
+
+```{r elevation_overlap_venn_only_enriched, echo=FALSE, message=FALSE, warning=FALSE}
+gene_overlap_data <- 
+  human_pig_gene_class_comparison_long %>% 
+  filter(spec_category_human %in% c("tissue enriched", "group enriched") |
+           spec_category_pig %in% c("tissue enriched", "group enriched")) %>%
+  filter(ortholog_type == "ortholog_one2one") %>%
+  left_join(human_gene_class_comparison %>%
+              select(1:2),
+            by = c("ensg_id" = "gene")) %>%
+  left_join(pig_gene_class_comparison %>%
+              select(1:2),
+            by = c("enssscg_id" = "gene"), 
+            suffix = c("_human", "_pig")) %>%
+  filter(!is.na(comparison_id)) %>%
+  
+  group_by(comparison_id, enssscg_id, ensg_id, spec_score_human, spec_score_pig) %>%
+  summarise(type = case_when(any(!is.na(enriched_tissues_human) & 
+                                   !is.na(enriched_tissues_pig)) ~ "Overlap",
+                             all(is.na(enriched_tissues_human)) ~ "Pig", 
+                             all(is.na(enriched_tissues_pig)) ~ "Human")) %>%
+  ungroup()
+
+
+gene_overlap_data %>% 
+  group_by(comparison_id, type) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {
+                                  filter(., type == "Overlap") %$%
+                                    comparison_id[order(n)]
+                                })) %>%
+  # left_join(crossing(comparison_id = unique(comparison_id), 
+  #                    type = c("Human", "Overlap", "Pig")), 
+  #           by = "comparison_id")
+  ggplot() + 
+  geom_col(mapping = aes(comparison_id, n,fill = type)) + 
+  
+  # geom_text(data = . %>% 
+  #             filter(type == "Pig"),
+  #           aes(x = comparison_id, y = 0,
+  #               label = n), 
+  #           hjust = 1) +
+  # geom_text(data = . %>% 
+  #             group_by(comparison_id) %>%
+  #             summarise(y = n[which(type == "Overlap")] / 2 + 
+  #                         n[which(type == "Pig")], 
+  #                       label = n[which(type == "Overlap")]),
+  #           aes(x = comparison_id, y = y,
+  #               label = label), 
+  #           hjust = 0.5, 
+  #           color = "white") +
+  # geom_text(data = . %>% 
+  #             group_by(comparison_id) %>%
+  #             summarise(y = sum(n), 
+  #                       label = n[which(type == "Human")]),
+  #           aes(x = comparison_id, y = y,
+  #               label = label), 
+  #           hjust = 0) +
+  
+  coord_flip() + 
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_y_continuous(expand = expand_scale(0.13)) +
+  
+  theme(axis.text.y = element_text(face = "bold"), 
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(),
+        
+        legend.position = c(0.5, 0.5))
+# ggsave(savepath("enrichment overlap barplot.pdf"), width= 5, height = 8)
+
+
+####
+gene_overlap_data %>% 
+  mutate(enrichment_score = case_when(type == "Overlap" ~ (spec_score_human + spec_score_pig) / 2,
+                                      type == "Human" ~ spec_score_human,
+                                      type == "Pig" ~ spec_score_pig)) %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {filter(., type == "Overlap") %>%
+                                    group_by(comparison_id) %>%
+                                    summarise(enrichment_score = median(enrichment_score)) %$%
+                                    comparison_id[order(enrichment_score)]})) %>%
+  ggplot(aes(type, enrichment_score ,fill = type)) + 
+  
+  geom_violin(draw_quantiles = 0.5, 
+              scale = "width", 
+              color = "white") +
+  
+  coord_flip() +
+  facet_wrap(~comparison_id, ncol = 1, strip.position = "left") +
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_y_log10() +
+  
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        strip.background = element_rect(fill = "white"),
+        strip.text.y = element_text(hjust = 1, face = "bold", angle = 180))
+ggsave(savepath("enrichment score overlap class violinplot.pdf"), width= 5, height = 10)
+
+plot_data <- 
+  gene_overlap_data %>% 
+  mutate(enrichment_score = case_when(type == "Overlap" ~ (spec_score_human + spec_score_pig) / 2,
+                                      type == "Human" ~ spec_score_human,
+                                      type == "Pig" ~ spec_score_pig)) %>%
+  group_by(comparison_id, type) %>% 
+  do({
+    g_data <- .
+    saved_data <<- g_data
+    
+    
+    summary(g_data$enrichment_score) %>% 
+      enframe("metric", "value") 
+  }) %>%
+  ungroup() %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {filter(., type == "Overlap" & metric == "Median") %$%
+                                    comparison_id[order(value)]})) %>%
+  mutate(order = unclass(comparison_id) * case_when(metric == "1st Qu." ~ -1, 
+                                                    metric == "Median" ~ 0, 
+                                                    metric == "3rd Qu." ~ 1)) %>%
+  arrange(order) %>%
+  filter(metric %in% c("1st Qu.", "Median", "3rd Qu.")) 
+
+plot_data %>%
+  # filter(metric %in% c("Median")) %>%
+  ggplot(aes(comparison_id, value, fill = type, color = type)) + 
+  geom_polygon(data = . %>%
+                 filter(!metric %in% c("Median")),
+                 aes(group = paste(type)),
+               alpha = 0.1, 
+               color = NA) +
+  
+  geom_point(data = . %>%
+                 filter(metric %in% c("Median"))) +
+  geom_line(data = . %>%
+                 filter(metric %in% c("Median")),
+            aes(group = type)) +
+  
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_color_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_linetype_manual(values = c("1st Qu." = "dashed", "Median" = "solid", "3rd Qu." = "dashed")) +
+  scale_y_log10() +
+  
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.ticks = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        strip.background = element_rect(fill = "white"),
+        strip.text.y = element_text(hjust = 1, face = "bold", angle = 180))
+ggsave(savepath("enrichment score overlap class median lineplot.pdf"), width= 8, height = 5)
+
+```
+
+```{r elevation_overlap_venn_comparison, echo=FALSE, message=FALSE, warning=FALSE}
+
+left_join(gene_overlap_data %>%
+            group_by(comparison_id, type) %>%
+            summarise(n = n()),
+          gene_var_overlap_data %>%
+            group_by(comparison_id, type) %>%
+            summarise(n = n()),
+          by = c("comparison_id", "type"),
+          suffix = c("", "_var")) %>%
+  ggplot(aes(n, n_var)) + 
+  geom_point()
+   
+```
+
+
+## All orthologs
 ```{r all_orth_comparison}
 
 human_pig_gene_all_orths_class_comparison_long <- 
@@ -3955,7 +4673,7 @@ if(file.exists("../../data/processed/pig_anova.tab")) {
     g_data <- .
     saved_data <<- g_data
 
-    model <- aov(log2(tmm + 1) ~ sex + tissue_ID + individual,
+    model <- aov(log2(tmm + 1) ~ sex + tissue_ID,
                  data = g_data)
 
     
@@ -3977,25 +4695,24 @@ if(file.exists("../../data/processed/pig_anova.tab")) {
   write_delim(anova_sex_res, "../../data/processed/pig_anova.tab", delim = "\t")
 }
 
-if(file.exists("../../data/processed/pig_anova_nosex_tissues.tab")) {
-  anova_nosex_res <- read_delim("../../data/processed/pig_anova_nosex_tissues.tab", delim = "\t")
+if(file.exists("../../data/processed/pig_anova_interaction.tab")) {
+  anova_sex_int_res <- read_delim("../../data/processed/pig_anova_interaction.tab", delim = "\t")
 } else {
-  anova_nosex_res <- 
-    pig_atlas_sample_norm %>% 
-    filter(!tissue_ID %in% c('bre', 'bul', 'cerv', 'end', 'epi', 'fal', 'mag', 'ova', 'pen', 'pro', 'sem', 'tes', 'vas')) %>% 
-    mutate(sex = case_when(individual %in% c("a", "b") ~ "female",
-                           individual %in% c("c", "d") ~ "male")) %>%
-    group_by(enssscg_id) %>% 
-    mutate(sd_ = sd(tmm)) %>%
-    filter(sd_ > 0) %>%
-    select(-sd_) %>% 
-    do({
-      g_data <- .
-      saved_data <<- g_data
-      
-      model <- aov(log2(tmm + 1) ~ sex + tissue_ID + individual,
-                   data = g_data)
-      
+  anova_sex_int_res <- 
+  pig_atlas_sample_norm %>% 
+  mutate(sex = case_when(individual %in% c("a", "b") ~ "female",
+                         individual %in% c("c", "d") ~ "male")) %>%
+  group_by(enssscg_id) %>% 
+  mutate(sd_ = sd(tmm)) %>%
+  filter(sd_ > 0) %>%
+  select(-sd_) %>% 
+  do({
+    g_data <- .
+    saved_data <<- g_data
+
+    model <- aov(log2(tmm + 1) ~ sex + tissue_ID + sex:tissue_ID,
+                 data = g_data)
+
     
     res <-
       model %>%
@@ -4012,7 +4729,7 @@ if(file.exists("../../data/processed/pig_anova_nosex_tissues.tab")) {
   ungroup() %>%
   mutate(significant = adj_pval < 0.05) 
   
-  write_delim(anova_nosex_res, "../../data/processed/pig_anova_nosex_tissues.tab", delim = "\t")
+  write_delim(anova_sex_int_res, "../../data/processed/pig_anova_interaction.tab", delim = "\t")
 }
 
 if(file.exists("../../data/processed/pig_anova_ward_cluster.Rdata")) {
@@ -4038,22 +4755,7 @@ anova_sex_res %>%
   ggplot(aes(sqrt_omega)) + 
   geom_density()
 
-anova_nosex_res %>% 
-  filter(term == "sex") %>%
-  filter(adj_pval < 0.05) %>% 
-  ggplot(aes(sqrt_omega)) + 
-  geom_density()
 
-left_join(anova_nosex_res %>% 
-            select(1, 2, sqrt_omega),
-          anova_sex_res %>% 
-            select(1, 2, sqrt_omega), 
-          by = c("enssscg_id", "term")) %>% 
-  filter(term == "sex") %>%
-  filter(sqrt_omega.x > 0.05 | sqrt_omega.y > 0.05) %>%
-  ggplot(aes(sqrt_omega.x, sqrt_omega.y)) +
-  geom_point()
-  
 
 
 anova_sex_res_geneinfo <-
@@ -4091,12 +4793,45 @@ anova_sex_res_cluster_barplot <-
                                "individual" = "skyblue", "sex" = "darkblue")) + 
   
   theme(axis.text.x = element_blank())
+ggsave(savepath("ANOVA Pig cluster barplot.pdf"), 
+       plot = anova_sex_res_cluster_barplot, 
+       width = 10, height = 10) 
 
+anova_sex_int_res_cluster_barplot <- 
+  anova_sex_int_res %>% 
+  arrange(term, sqrt_omega) %>%
+  mutate(enssscg_id = factor(enssscg_id, unique(enssscg_id)), 
+         term = factor(term, c("Residuals", "tissue_ID", "sex:tissue_ID", "sex"))) %>%
+  ggplot(aes(enssscg_id, sqrt_omega, fill = term)) + 
+  geom_col() + 
+  stripped_theme_facet + 
+  scale_fill_manual(values = c("Residuals" = "gray", "tissue_ID" = "orangered", 
+                               "sex:tissue_ID" = "skyblue", "sex" = "darkblue")) + 
+  
+  theme(axis.text.x = element_blank())
+ggsave(savepath("ANOVA interaction Pig cluster barplot.pdf"), 
+       plot = anova_sex_int_res_cluster_barplot, 
+       width = 10, height = 10) 
 
-ggsave(savepath("ANOVA Pig cluster barplot.pdf"), width = 10, height = 10)  
-ggsave(savepath("ANOVA Pig cluster barplot2.pdf"), width = 10, height = 4)  
+anova_sex_int_res_cluster_barplot2 <- 
+  anova_sex_int_res %>% 
+  mutate(enssscg_id = factor(enssscg_id, levels = {filter(., term %in% c("sex", "sex:tissue_ID")) %>%
+      group_by(enssscg_id) %>%
+      summarise(sum_sqrt = sum(sqrt_omega)) %$% 
+      enssscg_id[order(sum_sqrt)]}),
+         term = factor(term, c("Residuals", "tissue_ID", "sex:tissue_ID", "sex"))) %>%
+  ggplot(aes(enssscg_id, sqrt_omega, fill = term)) + 
+  geom_col() + 
+  stripped_theme_facet + 
+  scale_fill_manual(values = c("Residuals" = "gray", "tissue_ID" = "orangered", 
+                               "sex:tissue_ID" = "skyblue", "sex" = "darkblue")) + 
+  
+  theme(axis.text.x = element_blank())
+ggsave(savepath("ANOVA interaction Pig cluster barplot2.pdf"), 
+       plot = anova_sex_int_res_cluster_barplot2, 
+       width = 10, height = 10) 
 
-anova_sex_res_cluster_barplot <- 
+anova_sex_res_cluster_barplot3 <- 
   anova_sex_res %>% 
   mutate(enssscg_id = factor(enssscg_id, {filter(., term == "Residuals") %$% 
       enssscg_id[order(sqrt_omega)]}), 
@@ -4112,7 +4847,8 @@ anova_sex_res_cluster_barplot <-
   ylab("% Variance explained") + 
   theme(axis.ticks.x = element_blank(), 
         panel.border = element_blank())
-ggsave(savepath("ANOVA Pig cluster barplot3.pdf"), width = 10, height = 4)  
+ggsave(savepath("ANOVA Pig cluster barplot3.pdf"), plot = anova_sex_res_cluster_barplot3,
+       width = 10, height = 4)  
 
 anova_sex_res_geneinfo %>% 
   group_by(spec_category, term) %>%
@@ -4245,21 +4981,20 @@ if(file.exists("../../data/processed/pig_human_anova.tab")) {
       model <- aov(log2(nx + 1) ~ comparison_tissue + species,
                    data = g_data)
       
-    
-    res <-
-      model %>%
-
-      tidy() %>%
-      left_join(omega_sq(model) %>% 
-                  enframe("term", "sqrt_omega") %>%
-                  mutate(term = trimws(term)), 
-                by = "term")
-    res
-  }) %>%
-  group_by(term) %>%
-  mutate(adj_pval = p.adjust(p.value, method = "BH")) %>%
-  ungroup() %>%
-  mutate(significant = adj_pval < 0.05) 
+      res <-
+        model %>%
+        
+        tidy() %>%
+        left_join(omega_sq(model) %>% 
+                    enframe("term", "sqrt_omega") %>%
+                    mutate(term = trimws(term)), 
+                  by = "term")
+      res
+    }) %>%
+    group_by(term) %>%
+    mutate(adj_pval = p.adjust(p.value, method = "BH")) %>%
+    ungroup() %>%
+    mutate(significant = adj_pval < 0.05) 
   
   write_delim(anova_pig_human_res, "../../data/processed/pig_human_anova.tab", delim = "\t")
 }
@@ -4893,6 +5628,281 @@ dev.off()
   
 
 ```
+
+###ANOVA test
+
+```{r anova_test, echo=FALSE, message=FALSE, warning=FALSE}
+
+anova_test_res <- 
+    joined_species_atlas_comparison %>%
+    select(mutual_id, comparison_tissue, human_nx, pig_nx) %>%
+    gather(species, nx, human_nx, pig_nx) %>%
+    mutate(species = gsub("_nx", "", species)) %>% 
+    group_by(mutual_id) %>% 
+    mutate(sd_ = sd(nx)) %>%
+    filter(sd_ > 0) %>%
+    select(-sd_) %>% 
+    do({
+      g_data <- .
+      saved_data <<- g_data
+      
+      
+       md1 <- aov(nx ~ species + comparison_tissue,
+               data = g_data)
+       
+       md2 <- aov(log2(nx) ~ species + comparison_tissue,
+               data = g_data %>%
+                 filter(nx != 0))
+       
+       md3 <- aov(log2(nx + 1) ~ species + comparison_tissue,
+               data = g_data)
+       
+       
+       md1 %>% 
+         tidy() %>%
+         left_join(omega_sq(md1) %>% 
+                     enframe("term", "sqrt_omega") %>%
+                     mutate(term = trimws(term)), 
+                   by = "term") %>%
+         mutate(type = "nonlogged") %>%
+         bind_rows(md2 %>% 
+                     tidy() %>%
+                     left_join(omega_sq(md2) %>% 
+                                 enframe("term", "sqrt_omega") %>%
+                                 mutate(term = trimws(term)), 
+                               by = "term") %>%
+                     mutate(type = "logged")) %>%
+         bind_rows(md3 %>% 
+                     tidy() %>%
+                     left_join(omega_sq(md3) %>% 
+                                 enframe("term", "sqrt_omega") %>%
+                                 mutate(term = trimws(term)), 
+                               by = "term") %>%
+                     mutate(type = "logged_plus1")) 
+       
+       
+  }) %>%
+  group_by(term, type) %>%
+  mutate(adj_pval = p.adjust(p.value, method = "BH")) %>%
+  ungroup() %>%
+  mutate(significant = adj_pval < 0.05) 
+
+
+anova_test_res %>% 
+  select(1, 2, sqrt_omega, type) %>%
+  spread(type, sqrt_omega) %>% {
+    ggplot(., aes(logged, logged_plus1)) +
+      geom_hex(aes(fill = stat(log10(count))),
+               bins = 100, 
+               show.legend = F) + 
+      facet_wrap(~ term, ncol = 1) +
+      scale_fill_viridis_c() +
+      stripped_theme_facet +
+      ggplot(., aes(logged, nonlogged)) +
+      geom_hex(aes(fill = stat(log10(count))),
+               bins = 100, 
+               show.legend = F) + 
+      facet_wrap(~ term, ncol = 1) +
+      scale_fill_viridis_c() +
+      stripped_theme_facet +
+      ggplot(., aes(nonlogged, logged_plus1)) +
+      geom_hex(aes(fill = stat(log10(count))),
+               bins = 100, 
+               show.legend = F) + 
+      facet_wrap(~ term, ncol = 1) +
+      scale_fill_viridis_c() +
+      stripped_theme_facet
+  }
+
+
+anova_test_res %>% 
+  # filter(type == "logged_plus1") %>%
+  select(1, 2, sqrt_omega, type, type) %>%
+  spread(term, sqrt_omega) %>%
+  ggplot(aes(x = comparison_tissue, 
+             y = species)) +
+  geom_hex(aes(fill = stat(log10(count))),
+           bins = 50,
+           show.legend = F) +
+  # ggtern::stat_density_tern(aes(fill = ..level..), 
+  #                           geom = "polygon") +
+  scale_fill_viridis_c(direction = -1) +
+  facet_wrap(~ type, nrow = 1) +
+  stripped_theme_facet
+
+anova_test_res %>% 
+  # filter(type == "logged_plus1") %>%
+  select(1, 2, sqrt_omega, type) %>%
+  spread(term, sqrt_omega) %>%
+  ggtern::ggtern(aes(x = comparison_tissue, 
+                     y = Residuals, 
+                     z = species)) +
+  ggtern::geom_hex_tern(aes(fill = stat(log10(count))),
+                        bins = 50,
+                        show.legend = F) +
+  # ggtern::stat_density_tern(aes(fill = ..level..), 
+  #                           geom = "polygon") +
+  scale_fill_viridis_c(direction = -1) +
+  facet_wrap(~ type, nrow = 1) +
+  stripped_theme_facet 
+
+anova_test_res %>% 
+  # filter(type == "logged_plus1") %>%
+  select(1, 2, sqrt_omega, type) %>%
+  spread(type, sqrt_omega) %>%
+  ggtern::ggtern(aes(x = logged, 
+                     y = logged_plus1, 
+                     z = nonlogged)) +
+  ggtern::geom_hex_tern(aes(fill = stat(log10(count))),
+                        bins = 50,
+                        show.legend = F) +
+  # ggtern::stat_density_tern(aes(fill = ..level..), 
+  #                           geom = "polygon") +
+  scale_fill_viridis_c(direction = -1) +
+  facet_wrap(~ term, nrow = 1) +
+  stripped_theme_facet
+
+
+###
+
+anova_test_res %>% 
+  # filter(type == "logged_plus1") %>%
+  select(1, 2, sqrt_omega, type) %>%
+  spread(type, sqrt_omega) %>%
+  left_join(complete_comparison_table %>%
+              mutate(mutual_id = paste(enssscg_id, ensg_id, sep = "_")) %>% 
+              select(mutual_id, cor_pearson, cor_spearman, enrichment_overlap,
+                     dist_category_human, spec_category_human,
+                     dist_category_pig, spec_category_pig,
+                     dist)) %>% 
+  ggtern::ggtern(aes(x = logged, 
+                     y = logged_plus1, 
+                     z = nonlogged)) +
+  # ggtern::geom_hex_tern(aes(fill = stat(log10(count))),
+  #                       bins = 10,
+  #                       show.legend = F) +
+  ggtern::stat_density_tern(aes(fill = log10(..level..)),
+                            geom = "polygon", n = 25) +
+  scale_fill_viridis_c(direction = -1) +
+  # facet_wrap(~ term, nrow = 1) +
+  facet_grid(spec_category_human ~ term) 
+
+
+
+anova_test_res %>% 
+  # filter(type == "logged_plus1") %>%
+  select(1, 2, sqrt_omega, type) %>%
+  spread(type, sqrt_omega) %>%
+  left_join(complete_comparison_table %>%
+              mutate(mutual_id = paste(enssscg_id, ensg_id, sep = "_")) %>% 
+              select(mutual_id, cor_pearson, cor_spearman, enrichment_overlap,
+                     dist_category_human, spec_category_human,
+                     dist_category_pig, spec_category_pig,
+                     dist)) %>% 
+  filter(term == "comparison_tissue") %>% {
+                       p1 <<- 
+                         ggplot(., aes(logged, logged_plus1)) +
+                         geom_hex(aes(fill = stat(log10(count))),
+                                  bins = 50, 
+                                  show.legend = F) + 
+                         facet_wrap(~ spec_category_human, ncol = 1) +
+                         scale_fill_viridis_c() +
+                         stripped_theme_facet 
+                       
+                       p2 <<- 
+                         ggplot(., aes(logged, nonlogged)) +
+                         geom_hex(aes(fill = stat(log10(count))),
+                                  bins = 50, 
+                                  show.legend = F) + 
+                         facet_wrap(~ spec_category_human, ncol = 1) +
+                         scale_fill_viridis_c() +
+                         stripped_theme_facet 
+                       
+                       p3 <<- 
+                         ggplot(., aes(nonlogged, logged_plus1)) +
+                         geom_hex(aes(fill = stat(log10(count))),
+                                  bins = 50, 
+                                  show.legend = F) + 
+                         facet_wrap(~ spec_category_human, ncol = 1) +
+                         scale_fill_viridis_c() +
+                         stripped_theme_facet
+                       
+                     }
+p1 
+p2
+p3
+
+
+plot_data <- 
+  anova_test_res %>% 
+  # filter(type == "logged_plus1") %>%
+  select(1, 2, sqrt_omega, type) %>%
+  left_join(complete_comparison_table %>%
+              mutate(mutual_id = paste(enssscg_id, ensg_id, sep = "_")) %>% 
+              select(mutual_id, cor_pearson, cor_spearman, enrichment_overlap,
+                     dist_category_human, spec_category_human,
+                     dist_category_pig, spec_category_pig,
+                     dist)) %>%
+  mutate(spec_category_human = factor(spec_category_human,
+                                      spec_category_levels),
+         enrichment_overlap = factor(enrichment_overlap, 
+                                     enrichment_overlap_levels))
+  
+plot_data %>%
+  filter(term != "Residuals") %>%
+  filter(type != "logged") %>%
+  
+  ggplot(aes(type, sqrt_omega, fill = spec_category_human, alpha = enrichment_overlap)) + 
+  geom_violin(draw_quantiles = 0.5, 
+              show.legend = F, 
+              scale = "width") + 
+  facet_grid(enrichment_overlap ~ term) +
+  scale_fill_manual(values = gene_category_pal) +
+  scale_alpha_manual(values = c("full overlap" = 1, 
+                                "partial overlap" = 0.65,
+                                "no overlap" = 0.3)) +
+  stripped_theme_facet + 
+  theme(panel.spacing = unit(0, "cm"))
+
+plot_data %>%
+  filter(term == "comparison_tissue") %>%
+  ggplot(aes(cor_spearman, sqrt_omega)) + 
+  geom_hex(aes(alpha = stat(log10(count)),
+               fill = spec_category_human), 
+           show.legend = F,
+           bins = 30) +
+  facet_grid(enrichment_overlap ~ spec_category_human) +
+  scale_fill_manual(values = gene_category_pal) +
+  stripped_theme_facet + 
+  theme(panel.spacing = unit(0, "cm"))
+
+plot_data %>%
+  filter(term == "comparison_tissue") %>%
+  ggplot(aes(cor_pearson, sqrt_omega)) + 
+  geom_hex(aes(alpha = stat(log10(count)),
+               fill = spec_category_human), 
+           show.legend = F,
+           bins = 30) +
+  facet_grid(enrichment_overlap ~ spec_category_human) +
+  scale_fill_manual(values = gene_category_pal) +
+  stripped_theme_facet + 
+  theme(panel.spacing = unit(0, "cm"))
+
+plot_data %>%
+  filter(term == "comparison_tissue") %>%
+  ggplot(aes(dist, sqrt_omega)) + 
+  geom_hex(aes(alpha = stat(log10(count)),
+               fill = spec_category_human), 
+           show.legend = F,
+           bins = 30) +
+  facet_grid(enrichment_overlap ~ spec_category_human) +
+  scale_fill_manual(values = gene_category_pal) +
+  scale_x_log10() +
+  stripped_theme_facet + 
+  theme(panel.spacing = unit(0, "cm"))
+
+```
+
 
 ##Ortholog ANOVA
 
@@ -5618,6 +6628,9 @@ ortholog_connection_data_high_conf <-
 
 ```
 
+
+
+
 ##Ortholog assignment omega
 
 All genes are part of ortholog network communities. As one gene is retrieved, data on the whole network is retrieved. The primary ortholog is defined as the one with highest amount of variance explained by tissue rather than species differences or residuals.
@@ -5629,7 +6642,7 @@ example_genes <-
   ortholog_connection_data_high_conf %>% 
   filter(community_size > 2) %$%
   sample(c(ensg_id,
-           enssscg_id), 50)
+           enssscg_id), 100)
 
 pdf(savepath("ortholog network examples.pdf"), width = 8, height = 5, useDingbats = F)
 lapply(example_genes, 
@@ -5644,6 +6657,505 @@ lapply(example_genes,
 dev.off()
   
 
+```
+
+###Fishbone plots
+
+```{r fishbone_plot, echo=FALSE, message=FALSE, warning=FALSE}
+
+example_communities <- 
+  ortholog_connection_data_high_conf %>% 
+  filter(community_size > 2) %$%
+  sample(unique(community), 50)
+
+
+
+
+example_genes <- 
+  ortholog_connection_data_high_conf %>% 
+  filter(community %in% example_communities) %>%
+  pull(enssscg_id) %>% 
+  unique()
+
+pdf(savepath("fishbone high conf examples.pdf"), width = 16, height = 10, useDingbats = F)
+lapply(example_genes, 
+       function(x) {
+         
+         print(x)
+         
+         quick_atlas_fishboneplot(data = joined_comparison_atlas_allorth, 
+                         orth_connection_data = ortholog_connection_data_high_conf, 
+                         example_gene = x) +
+           ortholog_connection_plot(ortholog_connection_data_high_conf, x) + 
+           plot_layout(nrow = 1,
+              widths = c(1, 0.8))
+         
+         })
+dev.off()
+
+
+
+```
+
+
+###Overall plots of assigned orthologs
+
+```{r orth_assignment_plots, echo=FALSE, message=FALSE, warning=FALSE}
+
+ortholog_connection_data_high_conf %>%
+  ggplot(aes(mutual_primary, expression_identity)) +
+  geom_violin()
+
+
+
+# ANOVA ranked variance explained plot
+
+## Primary no o2o
+
+plot_data <-
+  ortholog_comparison_anova_geninfo %>%
+  inner_join(ortholog_connection_data_high_conf %>% 
+               filter(ortholog_type != "ortholog_one2one") %>%
+               filter(ortholog_class_human == "primary" & ortholog_class_pig == "primary" ) %>% 
+               select(1:2),
+             by = c("enssscg_id", "ensg_id")) %>%
+  
+  
+  mutate(term = case_when(term %in% c("Residuals", "species") ~ "Residuals and species", 
+                          term == "comparison_tissue" ~ "Tissue")) %>%
+  
+  group_by(mutual_id, 
+           enssscg_id, 
+           ensg_id, 
+           term, 
+           ortholog_type, 
+           n_enriched_overlap, 
+           enrichment_overlap, 
+           dist_category_human, 
+           spec_category_human, 
+           dist_category_pig, 
+           spec_category_pig, 
+           enrichment_overlap,
+           shared_dist_category, 
+           shared_spec_category) %>% 
+  summarise(var_exp = sum(sqrt_omega)) %>%
+  ungroup() %>%
+  left_join(complete_comparison_table %>% 
+              select(1, 2, cor_pearson, cor_spearman), 
+            by = c("ensg_id", "enssscg_id")) %>%
+  
+  mutate(mutual_id = factor(mutual_id, filter(., term == "Residuals and species") %>% 
+                              arrange(var_exp) %>% 
+                              pull(mutual_id)), 
+         term = factor(term, rev(anova_levels)), 
+         rank = unclass(mutual_id)) 
+
+  
+p1 <- 
+  plot_data %>% 
+  ggplot(aes(mutual_id, 100 * var_exp, fill = term)) + 
+  geom_col(position = "fill", 
+           show.legend = F) + 
+  stripped_theme_facet + 
+  
+  scale_fill_manual(values = anova_pal) + 
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  
+  ylab("Explained variance (%)") +
+  xlab("Genes") +
+  
+  annotate("text", 
+           x = c(0.25, 0.75) * max(plot_data$rank),
+           y = c(0.75, 0.25),
+           label = plot_data %>% 
+             group_by(term) %>% 
+             summarise(var_exp = 100 * mean(var_exp)) %$% 
+             paste0(term, "\n", round(var_exp, 1), " %")) +
+  
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(),
+        
+        panel.border = element_blank())
+
+
+p2 <- 
+  plot_data %>% 
+  select(rank, 
+         spec_category_human, 
+         spec_category_pig,
+         dist_category_human, 
+         dist_category_pig) %>% 
+  distinct() %>%
+  gather(category_type, category, -rank) %>% 
+  mutate(species = str_extract(category_type, "human$|pig$"),
+         species = str_to_sentence(species),
+         category_type = gsub("_human$|_pig$", "", category_type),
+         category = str_to_sentence(category), 
+         category = factor(category, unique(c(spec_category_levels, dist_category_levels)))) %>%
+  ggplot(aes(x = rank, y = species, fill = category)) +
+  ggridges::geom_density_ridges(show.legend = F, 
+                                alpha = 0.6) +
+  
+  facet_wrap(~ category, ncol = 1, strip.position = "right") +
+  
+  scale_fill_manual(values = gene_category_pal) + 
+  scale_x_continuous(expand = c(0,0), limits = c(0, max(plot_data$rank))) +
+  
+  stripped_theme + 
+  theme(strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"), 
+        strip.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        axis.title = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        axis.line.x = element_blank(), 
+        axis.line.y = element_blank())
+
+
+
+p3 <- 
+  plot_data %>% 
+  select(rank, 
+         spec_category_human, 
+         spec_category_pig,
+         n_enriched_overlap) %>% 
+  distinct() %>%
+  arrange(rank) %>%
+  gather(species, category, -rank, -n_enriched_overlap) %>% 
+  mutate(species = str_extract(species, "human$|pig$"), 
+         species = str_to_sentence(species),
+         category = factor(category, spec_category_levels), 
+         category = str_to_sentence(category)) %>%
+  arrange(rank) %>% 
+  filter(!category %in% c("Low tissue specificity", "Not detected")) %>%
+  ggplot(aes(x = rank, y = n_enriched_overlap, linetype = species,  color = category)) +
+  # geom_line(show.legend = F) +
+  geom_smooth(fill = NA, 
+              show.legend = T) +
+  facet_wrap(~ "Number of overlapping\nenriched tissues", ncol = 1, strip.position = "right") +
+  
+  scale_color_manual(values = gene_category_pal, guide= F) +
+  scale_linetype_discrete(name = "") +
+  scale_x_continuous(expand = c(0,0), limits = c(0, max(plot_data$rank))) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1)) +
+  
+  stripped_theme + 
+  theme(strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"), 
+        strip.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        axis.title = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        axis.line.x = element_line(color = "gray"),
+        axis.line.y = element_blank(),
+        legend.position = c(0.8, 0.8))
+
+p4 <- 
+  plot_data %>% 
+  select(rank, 
+         # spec_category_human, 
+         # spec_category_pig,
+         cor_pearson, 
+         cor_spearman) %>% 
+  distinct() %>%
+  # arrange(rank) %>% 
+  gather(cor_type, cor, -rank) %>% 
+  mutate(cor_type = gsub("^cor_", "", cor_type), 
+         cor_type = str_to_sentence(cor_type)) %>%
+  arrange(rank) %>% 
+  ggplot(aes(x = rank, y =  cor)) +
+  
+  geom_abline(slope = 0,
+              color = "gray") +
+  
+  # geom_hex(aes(fill = stat(log10(count))), 
+  #          bins = 100, 
+  #          show.legend = F) +
+  geom_smooth(aes(color = cor_type),
+              show.legend = T) +
+  
+  
+  
+  # facet_wrap(~ cor_type, ncol = 1, strip.position = "right") +
+  
+  
+  
+  scale_fill_viridis_c() +
+  scale_color_discrete(name = "") +
+  scale_x_continuous(expand = c(0,0), limits = c(0, max(plot_data$rank))) +
+  scale_y_continuous(expand = c(0,0)) +
+  
+  stripped_theme + 
+  theme(strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"), 
+        strip.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        axis.title = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        legend.position = c(0.8, 0.8), 
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank())
+
+
+p5 <- 
+  plot_data %>% 
+  select(rank, 
+         enrichment_overlap) %>% 
+  distinct() %>% 
+  mutate(enrichment_overlap = str_to_sentence(enrichment_overlap), 
+         enrichment_overlap = factor(enrichment_overlap, enrichment_overlap_levels)) %>%
+  arrange(rank) %>% 
+  ggplot(aes(x = rank, fill = enrichment_overlap)) +
+  geom_density(show.legend = T, 
+                                alpha = 0.6) +
+  
+  
+  
+  scale_fill_manual(values = enrichment_overlap_pal, name = "Enrichment Overlap") +
+  scale_x_continuous(expand = c(0,0), limits = c(0, max(plot_data$rank))) +
+  
+  stripped_theme + 
+  theme(strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"), 
+        strip.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        axis.title = element_blank(), 
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(), 
+        axis.line.x = element_blank(), 
+        axis.line.y = element_blank(), 
+        legend.position = c(0.8,0.8))
+
+pdf(savepath("Species ANOVA non o2o primary ortholog summary plot.pdf"), 
+    height = 10, width = 6, useDingbats = F)
+p4 + p5 + p3 + p2 + p1 + 
+  plot_layout(ncol = 1,
+              heights = c(0.5, 0.5, 0.5, 1, 1))
+dev.off()
+
+
+## Secondary no o2o
+
+plot_data <-
+  ortholog_comparison_anova_geninfo %>%
+  inner_join(ortholog_connection_data_high_conf %>% 
+               filter(ortholog_type != "ortholog_one2one") %>%
+               filter(ortholog_class_human == "secondary" | ortholog_class_pig == "secondary" ) %>% 
+               select(1:2),
+             by = c("enssscg_id", "ensg_id")) %>%
+  
+  
+  mutate(term = case_when(term %in% c("Residuals", "species") ~ "Residuals and species", 
+                          term == "comparison_tissue" ~ "Tissue")) %>%
+  
+  group_by(mutual_id, 
+           enssscg_id, 
+           ensg_id, 
+           term, 
+           ortholog_type, 
+           n_enriched_overlap, 
+           enrichment_overlap, 
+           dist_category_human, 
+           spec_category_human, 
+           dist_category_pig, 
+           spec_category_pig, 
+           enrichment_overlap,
+           shared_dist_category, 
+           shared_spec_category) %>% 
+  summarise(var_exp = sum(sqrt_omega)) %>%
+  ungroup() %>%
+  left_join(complete_comparison_table %>% 
+              select(1, 2, cor_pearson, cor_spearman), 
+            by = c("ensg_id", "enssscg_id")) %>%
+  
+  mutate(mutual_id = factor(mutual_id, filter(., term == "Residuals and species") %>% 
+                              arrange(var_exp) %>% 
+                              pull(mutual_id)), 
+         term = factor(term, rev(anova_levels)), 
+         rank = unclass(mutual_id)) 
+
+  
+p1 <- 
+  plot_data %>% 
+  ggplot(aes(mutual_id, 100 * var_exp, fill = term)) + 
+  geom_col(position = "fill", 
+           show.legend = F) + 
+  stripped_theme_facet + 
+  
+  scale_fill_manual(values = anova_pal) + 
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  
+  ylab("Explained variance (%)") +
+  xlab("Genes") +
+  
+  annotate("text", 
+           x = c(0.25, 0.75) * max(plot_data$rank),
+           y = c(0.75, 0.25),
+           label = plot_data %>% 
+             group_by(term) %>% 
+             summarise(var_exp = 100 * mean(var_exp)) %$% 
+             paste0(term, "\n", round(var_exp, 1), " %")) +
+  
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(),
+        
+        panel.border = element_blank())
+
+
+p2 <- 
+  plot_data %>% 
+  select(rank, 
+         spec_category_human, 
+         spec_category_pig,
+         dist_category_human, 
+         dist_category_pig) %>% 
+  distinct() %>%
+  gather(category_type, category, -rank) %>% 
+  mutate(species = str_extract(category_type, "human$|pig$"),
+         species = str_to_sentence(species),
+         category_type = gsub("_human$|_pig$", "", category_type),
+         category = str_to_sentence(category), 
+         category = factor(category, unique(c(spec_category_levels, dist_category_levels)))) %>%
+  ggplot(aes(x = rank, y = species, fill = category)) +
+  ggridges::geom_density_ridges(show.legend = F, 
+                                alpha = 0.6) +
+  
+  facet_wrap(~ category, ncol = 1, strip.position = "right") +
+  
+  scale_fill_manual(values = gene_category_pal) + 
+  scale_x_continuous(expand = c(0,0), limits = c(0, max(plot_data$rank))) +
+  
+  stripped_theme + 
+  theme(strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"), 
+        strip.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        axis.title = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        axis.line.x = element_blank(), 
+        axis.line.y = element_blank())
+
+
+
+p3 <- 
+  plot_data %>% 
+  select(rank, 
+         spec_category_human, 
+         spec_category_pig,
+         n_enriched_overlap) %>% 
+  distinct() %>%
+  arrange(rank) %>%
+  gather(species, category, -rank, -n_enriched_overlap) %>% 
+  mutate(species = str_extract(species, "human$|pig$"), 
+         species = str_to_sentence(species),
+         category = factor(category, spec_category_levels), 
+         category = str_to_sentence(category)) %>%
+  arrange(rank) %>% 
+  filter(!category %in% c("Low tissue specificity", "Not detected")) %>%
+  ggplot(aes(x = rank, y = n_enriched_overlap, linetype = species,  color = category)) +
+  # geom_line(show.legend = F) +
+  geom_smooth(fill = NA, 
+              show.legend = T) +
+  facet_wrap(~ "Number of overlapping\nenriched tissues", ncol = 1, strip.position = "right") +
+  
+  scale_color_manual(values = gene_category_pal, guide= F) +
+  scale_linetype_discrete(name = "") +
+  scale_x_continuous(expand = c(0,0), limits = c(0, max(plot_data$rank))) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1)) +
+  
+  stripped_theme + 
+  theme(strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"), 
+        strip.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        axis.title = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        axis.line.x = element_line(color = "gray"),
+        axis.line.y = element_blank(),
+        legend.position = c(0.8, 0.8))
+
+p4 <- 
+  plot_data %>% 
+  select(rank, 
+         # spec_category_human, 
+         # spec_category_pig,
+         cor_pearson, 
+         cor_spearman) %>% 
+  distinct() %>%
+  # arrange(rank) %>% 
+  gather(cor_type, cor, -rank) %>% 
+  mutate(cor_type = gsub("^cor_", "", cor_type), 
+         cor_type = str_to_sentence(cor_type)) %>%
+  arrange(rank) %>% 
+  ggplot(aes(x = rank, y =  cor)) +
+  
+  geom_abline(slope = 0,
+              color = "gray") +
+  
+  # geom_hex(aes(fill = stat(log10(count))), 
+  #          bins = 100, 
+  #          show.legend = F) +
+  geom_smooth(aes(color = cor_type),
+              show.legend = T) +
+  
+  
+  
+  # facet_wrap(~ cor_type, ncol = 1, strip.position = "right") +
+  
+  
+  
+  scale_fill_viridis_c() +
+  scale_color_discrete(name = "") +
+  scale_x_continuous(expand = c(0,0), limits = c(0, max(plot_data$rank))) +
+  scale_y_continuous(expand = c(0,0)) +
+  
+  stripped_theme + 
+  theme(strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"), 
+        strip.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        axis.title = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        legend.position = c(0.8, 0.8), 
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank())
+
+
+p5 <- 
+  plot_data %>% 
+  select(rank, 
+         enrichment_overlap) %>% 
+  distinct() %>% 
+  mutate(enrichment_overlap = str_to_sentence(enrichment_overlap), 
+         enrichment_overlap = factor(enrichment_overlap, enrichment_overlap_levels)) %>%
+  arrange(rank) %>% 
+  ggplot(aes(x = rank, fill = enrichment_overlap)) +
+  geom_density(show.legend = T, 
+                                alpha = 0.6) +
+  
+  
+  
+  scale_fill_manual(values = enrichment_overlap_pal, name = "Enrichment Overlap") +
+  scale_x_continuous(expand = c(0,0), limits = c(0, max(plot_data$rank))) +
+  
+  stripped_theme + 
+  theme(strip.text.y = element_text(angle = 0, hjust = 0, face = "bold"), 
+        strip.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        axis.title = element_blank(), 
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(), 
+        axis.line.x = element_blank(), 
+        axis.line.y = element_blank(), 
+        legend.position = c(0.8,0.8))
+
+pdf(savepath("Species ANOVA non o2o secondary ortholog summary plot.pdf"), 
+    height = 10, width = 6, useDingbats = F)
+p4 + p5 + p3 + p2 + p1 + 
+  plot_layout(ncol = 1,
+              heights = c(0.5, 0.5, 0.5, 1, 1))
+dev.off()
 ```
 
 
@@ -5795,9 +7307,13 @@ grid.draw(gt)
 dev.off()
 ```
 
-##Ortholog examples
 
-```{r orth_examples, echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+
+#Gene examples
+
+```{r gene_examples, echo=FALSE, message=FALSE, warning=FALSE}
+
+"SYP"
 
 Evelinas_gene_examples <- 
   read_delim("../../doc/Notes from Evelina/genes with ab staining in pig tissue.txt", delim = "\t") %>% 
@@ -5807,6 +7323,9 @@ Evelinas_gene_examples <-
   left_join(gene_orthologs, 
             by = "ensg_id") %>% 
   mutate(mutual_id = paste(ensg_id, enssscg_id, sep = " - "))
+
+example_gene_list <- 
+  Evelinas_gene_examples$
 
 plots <- 
   Evelinas_gene_examples %>% 
@@ -5853,6 +7372,16 @@ pdf(savepath("Evelinas gene example region barplots.pdf"),
     useDingbats = F)
 plots
 dev.off()
+
+
+pig_atlas_sample %>% 
+  mutate(gene_name = enssscg_id) %>%
+  filter(enssscg_id %in% "ENSSSCG00000029373") %>% View
+  quick_atlas_barplot(tis_col = "tissue_ID", 
+                      exp_col = "tpm", 
+                      gene_name_col = "gene_name", 
+                      gene_id_col = "individual")
+
 ```
 
 

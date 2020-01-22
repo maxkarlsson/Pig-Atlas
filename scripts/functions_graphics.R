@@ -2091,16 +2091,97 @@ quick_atlas_barplot <-
   }
 
 quick_atlas_fishboneplot <- 
-  function(data) {
-    data %>%
-      ggplot(aes(comparison_tissue, 
-                 nx,
-                 fill = comparison_tissue)) + 
-      geom_col(show.legend = F) + 
-      facet_wrap(~ paste(gene_name, "-", species_gene_id), ncol = 1) +
+  function(data, orth_connection_data, example_gene) {
+    
+    connection_data <- 
+      orth_connection_data %>% 
+      filter(enssscg_id == example_gene | ensg_id == example_gene) 
+    
+    selected_species <- 
+      case_when(grepl("^ENSG", example_gene) ~ "human",
+                grepl("^ENSSSCG", example_gene) ~ "pig")
+    
+    compare_species <- 
+      case_when(selected_species == "human" ~ "pig",
+                selected_species == "pig" ~ "human")
+    
+    x_order <- 
+      data %>%
+      filter(gene_id %in% c(connection_data$enssscg_id, connection_data$ensg_id)) %>%
+      mutate(selected_gene = gene_id == example_gene) %>% 
+      select(nx, comparison_tissue, selected_gene) %>%
+      arrange(!selected_gene, -nx) %>% 
+      filter(nx != 0) %>%
+      pull(comparison_tissue) %>%
+      as.character() %>%
+      c(unique(as.character(data$comparison_tissue))) %>%
+      unique() 
+      
+    plot_data <- 
+      data %>% 
+      filter(gene_id %in% c(connection_data$enssscg_id, 
+                            connection_data$ensg_id)) %>% 
+      select(1, 2, human_gene_name, comparison_tissue, nx, species) %>%
+      
+      filter(!is.na(comparison_tissue)) %>% 
+      select(-gene_id) %>%
+      
+      spread(species, nx) %>% 
+      filter(complete.cases(.)) %>%
+      
+      mutate(comparison_tissue = factor(comparison_tissue, levels = x_order), 
+             x = unclass(comparison_tissue)) %>% 
+      rename(upper_nx = selected_species,
+             lower_nx = compare_species) %>%
+      separate(mutual_id, into = c("enssscg_id", "ensg_id"), remove = F) %>%
+      mutate(label = human_gene_name)
+    
+    plot_range <- 
+      c(-1, 1) *
+      max(c(plot_data$upper_nx, 
+            plot_data$lower_nx))
+    
+    plot_data %>%
+      ggplot() + 
+      geom_segment(aes(x = comparison_tissue,
+                       xend = comparison_tissue,
+                       y = 0, 
+                       yend = upper_nx,
+                       color = comparison_tissue), 
+                   show.legend = F, 
+                   size = 4) + 
+      geom_segment(aes(x = comparison_tissue,
+                       xend = comparison_tissue,
+                       y = 0, 
+                       yend = -lower_nx, 
+                       color = comparison_tissue),
+                   show.legend = F, 
+                   size = 4) + 
+      
+      geom_hline(yintercept = 0, color = "darkgrey") +
+      # geom_text(aes(x = x,
+      #               y = upper_nx,
+      #               label = comparison_tissue), 
+      #           angle = 60, 
+      #           hjust = -0.1, 
+      #           vjust = 0) +
+      
+      ylab("NX") +
+      
+      facet_wrap(~ label + ensg_id, ncol = 1, strip.position = "right") +
+      
+      scale_color_manual(values = tissue_colors_palette_full_humanpig)  +
+      scale_y_continuous(limits = plot_range) +
+      
       stripped_theme_facet + 
-      theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
-      scale_fill_manual(values = tissue_colors_palette_full_humanpig)
+      theme(axis.title.x = element_blank(),
+            axis.ticks.x = element_blank(), 
+            axis.line.x = element_blank(),
+            panel.border = element_blank(), 
+            axis.text.x = element_text(angle = 60, hjust = 1))
+    
+    
+      
   }
 # ----- Not currently in use -----
 

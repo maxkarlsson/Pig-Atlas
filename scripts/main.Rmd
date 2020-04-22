@@ -516,77 +516,61 @@ if(file.exists("data/processed/pig_gene_propr_filtered.Rdata")) {
 
 ```{r}
 
-if(file.exists("data/processed/pig_gene_spearman.Rdata")) {
-  load("data/processed/pig_gene_spearman.Rdata")
+if(file.exists("data/processed/pig_gene_spearman_res.Rdata")) {
+  load("data/processed/pig_gene_spearman_res.Rdata")
   
 } else {
-  pig_gene_spearman_data <- 
-    pig_atlas_sample %>%
-    select(1, 2, ptpm) %>%
-    spread(enssscg_id, ptpm) %>%
-    column_to_rownames("sample_ID") 
   
-  # To calculate spearman correlation for all combination of genes is computationally expensive and not really desirable,
-  # therefore we filter genes that have max ptpm < 1, and only consider combinations that have absolute proportionality > 0.5 
-  filtered_genes <- 
-    basic_gene_stats %>% 
-    filter(max >= 1) %>% 
-    pull(enssscg_id)
+  if(file.exists("data/processed/pig_gene_spearman_data.Rdata")) {
+    load("data/processed/pig_gene_spearman_data.Rdata")
+    
+  } else {
+    # To calculate spearman correlation for all combination of genes is computationally expensive and not really desirable,
+    # therefore we filter genes that have max ptpm < 1, and only consider combinations that have absolute proportionality > 0.5 
+    filtered_genes <- 
+      basic_gene_stats %>% 
+      filter(max >= 1) %>% 
+      pull(enssscg_id)
+    
+    pig_gene_spearman_data <- 
+      pig_atlas_sample %>%
+      select(1, 2, ptpm) %>%
+      spread(enssscg_id, ptpm) %>%
+      column_to_rownames("sample_ID") 
+    
+    gene_combinations <- 
+      pig_gene_propr_res_05filtered %>%
+      filter(enssscg_id1 %in% filtered_genes & enssscg_id2 %in% filtered_genes) %>% 
+      select(1:2) 
+      
+    
+    save(pig_gene_spearman_data,
+         gene_combinations,
+         file = "data/processed/pig_gene_spearman_data.Rdata")
+  }
+  
+  require(multidplyr)
   
   
+  cluster <- new_cluster(detectCores() - 1)
   
+  cluster_copy(cluster, names = c("%>%", "pig_gene_spearman_data", "%$%", "tibble") )
   
-  tot_combs <- 
-    pig_gene_propr_res_05filtered %>%
-    filter(enssscg_id1 %in% filtered_genes & enssscg_id2 %in% filtered_genes) %>% nrow
-  n_gn <- 1000
-  gene_combinations <- 
-    pig_gene_propr_res_05filtered %>%
-    filter(enssscg_id1 %in% filtered_genes & enssscg_id2 %in% filtered_genes) %>% 
-    select(1:2) %>%
-    head(n_gn)
-  
-  t1 <- Sys.time()
-  gene_combinations %>%
+  pig_gene_spearman_res <- 
+    gene_combinations %>%
+    head(n_gs) %>%
     group_by(enssscg_id1, enssscg_id2) %>%
+    partition(cluster) %>%
+    
     do({
       cor.test(pig_gene_spearman_data[,.$enssscg_id1],
                pig_gene_spearman_data[,.$enssscg_id2], 
-               method = "spearman") %>%
-        tidy()
+               method = "spearman") %$%
+        tibble(cor = estimate,
+               p_val = p.value)
     })
-  
-  # rcorr()
-  # a <- lapply(1:nrow(gene_combinations),
-  #             function(i) {
-  #               cor.test(pig_gene_spearman_data[,gene_combinations$enssscg_id1[i]],
-  #                        pig_gene_spearman_data[,gene_combinations$enssscg_id2[i]])%>%
-  #       tidy()
-  #             })
-  
-  tm <- Sys.time() - t1
-  tm_per <- tm/nrow(gene_combinations)
-  tm_tot<- tm_per * tot_combs
-  
-  tm_tot / 3600
-  ((object.size(a)/nrow(gene_combinations)) * tot_combs)/10^9
-  
-  
-  gene_combinations %>%
-    left_join(pig_gene_spearman_data,
-              c("V1" = "enssscg_id")) %>%
-    left_join(pig_gene_spearman_data,
-              c("V2" = "enssscg_id", "sample_ID"),
-              suffix = c("1", "2")) 
-    
-  
-  pig_gene_propr_res <- 
-    pig_gene_propr@matrix
-  save(pig_gene_propr,
-       file = "data/processed/pig_gene_spearman.Rdata")
-  save(pig_gene_propr_res,
-       file = "data/processed/pig_gene_spearman.Rdata")
-  rm(pig_gene_propr)
+  save(pig_gene_spearman_res,
+       file = "data/processed/pig_gene_spearman_res.Rdata")
     
 } 
 

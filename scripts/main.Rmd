@@ -1,0 +1,1641 @@
+---
+title: "main"
+author: "Max J. Karlsson"
+date: "2020 M04 6"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+#Setup
+
+```{r start_up, warning=F, message=F, include = F}
+require(tidyverse)
+require(magrittr)
+require(pcaMethods)
+require(pheatmap)
+require(dendextend)
+require(ggdendro)
+require(umap)
+require(ggforce)
+require(Hmisc)
+require(NOISeq)
+require(ggrepel)
+require(gridExtra)
+require(ape)
+require(pbapply)
+require(mgsub)
+require(ggalluvial)
+require(igraph)
+require(ggraph)
+require(viridis)
+require(ggbeeswarm)
+require(gtable)
+require(grid)
+require(ggridges)
+require(broom)
+require(patchwork)
+require(propr)
+require(ellipse)
+
+setwd("~/Scilifelab/Projects/Pig Atlas")
+source("scripts/theme.R")
+source("scripts/functions_normalization.R")
+source("scripts/functions_classification.R")
+source("scripts/functions_graphics.R")
+source("scripts/functions_utility.R")
+```
+
+
+```{r read_data, include = F}
+
+# Load gene mapping tables
+gene_mapping <- 
+  read_delim("data/meta/ensembl_pig_gene.tab", delim = "\t") %>% 
+  filter(biotype == "protein_coding")
+gene_chromosome <- read_delim("data/meta/ensembl92_gene_chromosome.txt", delim = "\t")
+
+human_gene_mapping <- read_delim("data/meta/human/geninfo_92.tsv", delim = "\t")
+# Mapping to human genes
+
+gene_orthologs <- read_delim("data/meta/ensembl_pig_ortholog.tab", delim = "\t")
+gene_orthologs_all <- 
+  read_delim("data/meta/Ensembl_orthologs_all.txt", delim = "\t") %>% 
+  select(enssscg_id = 1,
+         ensg_id = 3, 
+         pig_gene_name = 2,
+         human_gene_name = 4,
+         ortholog_confidence = 10, 
+         ortholog_type = 5,
+         gene_order_conservation_score = 8, 
+         whole_genome_alignment_coverage = 9, 
+         sequence_identity = 6) %>%
+  filter(!is.na(ortholog_confidence)) %>% 
+  filter(ensg_id %in% human_gene_mapping$ensg_id) %>%
+  filter(enssscg_id %in% gene_mapping$enssscg_id)
+
+# Load sample mapping data
+tissue_mapping <- read_delim("data/meta/tissue_mapping.tsv", delim = "\t")
+## Tissue mapping
+human_tissue_mapping <- read_delim("data/meta/human_tissue_mapping.tsv", delim = "\t")
+
+sample_mapping <- 
+  expand.grid(tissue = tissue_mapping$tissue, 
+              individual = letters[1:4]) %>% 
+  mutate(sample_ID = paste(tissue, individual, sep = "_")) %>%
+  left_join(tissue_mapping, 
+            by = "tissue") %>%
+  as_tibble()
+
+tissue_colors <- read_delim("data/meta/pig_tissue_colors.tsv", delim = "\t")
+
+tissue_colors_palette <- 
+  c(setNames(tissue_colors$tissue_color, tissue_colors$tissue_name),
+    setNames(tissue_colors$tissue_color, str_to_sentence(tissue_colors$tissue_name)))
+
+sample_meta <- 
+  tibble(individual = letters[1:4],
+         sex = c("female", "female", "male", "male"))
+
+tissue_colors_palette_full <- 
+  tissue_colors %$%
+  tibble(color = c(tissue_color, region_tissue_color, consensus_tissue_color, organ_color),
+         tissue = c(tissue_name, region_tissue_name, consensus_tissue_name, organ_name)) %>%
+  unique() %$%
+  c(setNames(color, tissue),
+    setNames(color, str_to_sentence(tissue)))
+
+
+tissue_colors_palette_full_humanpig <-
+  tissue_colors %>%
+  left_join(tissue_mapping) %$%
+  tibble(color = c(tissue_color, region_tissue_color, consensus_tissue_color, organ_color, 
+                   tissue_color, region_tissue_color, consensus_tissue_color),
+         tissue = c(tissue_name, region_tissue_name, consensus_tissue_name, organ_name, 
+                    human_tissue_name, human_region_name, human_consensus_tissue_name)) %>%
+  unique() %$%
+  setNames(color, tissue) 
+
+tissue_colors_palette_full_humanpig_extension <- 
+  set_names(c(rep(tissue_colors_palette_full_humanpig, 2), 
+              "black", "black"),
+            c(paste(names(tissue_colors_palette_full_humanpig), "human"), 
+              paste(names(tissue_colors_palette_full_humanpig), "pig"),
+              "not enriched in human human", "not enriched in pig pig"))
+
+tissue_colors_palette_organs <- 
+  tissue_colors %$%
+  tibble(color = c(organ_color),
+         tissue = c(organ_name)) %>%
+  unique() %$%
+  setNames(color, tissue) 
+
+regions_organ_order <- 
+  bind_rows(tissue_mapping %>% 
+              select(region_tissue_name, organ_name),
+            human_tissue_mapping %>% 
+              select(region_tissue_name, organ_name)) %>% 
+  unique() %>% 
+  arrange(organ_name, region_tissue_name)
+
+region_levels <- 
+  unique(regions_organ_order$region_tissue_name)
+
+region_palette <- 
+  regions_organ_order %>%
+  left_join(tissue_colors %>% 
+              select(organ_name, organ_color)) %$%
+  set_names(organ_color, region_tissue_name)
+  
+
+comparison_organ_order <- 
+  bind_rows(tissue_mapping %>% 
+              select(comparison_tissue, organ_name),
+            human_tissue_mapping %>% 
+              select(comparison_tissue, organ_name)) %>% 
+  unique() %>% 
+  arrange(organ_name, comparison_tissue)
+
+comparison_levels <- 
+  unique(comparison_organ_order$comparison_tissue)
+
+
+consensus_organ_order <- 
+  bind_rows(tissue_mapping %>% 
+              select(consensus_tissue_name, organ_name),
+            human_tissue_mapping %>% 
+              select(consensus_tissue_name, organ_name)) %>% 
+  unique() %>% 
+  arrange(organ_name, consensus_tissue_name)
+
+consensus_levels <- 
+  unique(consensus_organ_order$consensus_tissue_name)
+  
+# Load data
+pig_atlas_sample_temp <- 
+  read_delim("data/processed/pig_filtered_sample_data.tab", delim = "\t")
+
+## Unfiltered
+pig_atlas_unfiltered_sample_temp <- 
+  read_delim("data/processed/pig_unfiltered_sample_data.tab", delim = "\t")
+
+pig_atlas_consensus <-
+  read_delim("data/HPA/consensus_pig_tissues_92.tsv", delim = "\t") %>%
+  rename(enssscg_id = ensg_id) %>%
+  mutate(tissue = gsub(" 1$", "", tissue))
+
+##classification
+
+pig_gene_classification <- 
+  read_delim("data/HPA/pig_consensus_category_piggenome_92.tsv", delim = "\t") %>%
+  rename(enssscg_id = ensg_id) 
+
+# Load human data
+
+## Tissue data
+human_atlas_tissue <-
+  bind_rows(read_delim("data/human data/lims/consensus_hpa_92.tsv", delim = "\t") %>%
+              mutate(source = "hpa"),
+            read_delim("data/human data/lims/consensus_gtex_92.tsv", delim = "\t") %>%
+              mutate(source = "gtex"),
+            read_delim("data/human data/lims/consensus_fantom_92.tsv", delim = "\t") %>%
+              mutate(source = "fantom")) %>% 
+  rename(tissue_name = celltype) %>%
+  group_by(tissue_name, ensg_id) %>% 
+  summarise(tpm = mean(tpm, na.rm = T),
+            ptpm = mean(ptpm, na.rm = T),
+            tmm = mean(tmm, na.rm = T),
+            nx = mean(nx, na.rm = T)) %>%
+  ungroup()
+
+## Blood data
+human_gene_class_blood <-
+  read_delim("data/meta/human/bloodcells_hpa_category_92.tsv", delim = "\t") 
+
+human_gene_class_bloodlineage <-
+  read_delim("data/meta/human/bloodcells_hpa_regional_category_92.tsv", delim = "\t") 
+              
+## All rna data 
+
+HPA_rna <-
+  read_delim("data/HPA/rna_tissue_consensus_HPA19.tsv", delim = "\t") %>%
+  rename(ensg_id = 1, 
+         gene_name = 2, 
+         tissue = 3, 
+         nx = 4)
+
+## Consensus data
+human_atlas_consensus <- 
+  read_delim("data/human data/lims/consensus_max_of_all_groups_92.tsv", delim = "\t") %>% 
+  rename(consensus_tissue_name = tissue)
+
+# Load human gene classifications 
+human_gene_class <- 
+  read_delim("data/human data/lims/consensus_all_category_92.tsv", delim = "\t") %>% 
+  select(ensg_id,
+         dist_category = distribution_category,
+         spec_category = specificity_category,
+         enriched_tissues = enhanced_tissues, 
+         spec_score = ts_score, enhanced_score) %>% 
+  mutate(enriched_tissues = gsub(", ", "_", enriched_tissues),
+         enriched_tissues = gsub(",", ";", enriched_tissues),
+         enriched_tissues = gsub("_", ", ", enriched_tissues),
+         enriched_tissues = trimws(enriched_tissues),
+         dist_category = tolower(dist_category),
+         spec_category = tolower(spec_category))
+  
+
+gene_list_alun <- 
+  read_delim("data/meta/Gene list from Alun.txt", delim = "\t")
+
+###
+
+SLA_genes <- 
+  read_csv("data/meta/SLA genes.csv")
+
+```
+
+
+# Compare Pers data
+
+```{r}
+
+pig_gene_classification
+pig_gene_classification_2 <- 
+  pig_atlas_consensus %>%
+  hpa_gene_classification(expression_col = "tmm", 
+                          tissue_col = "tissue", 
+                          gene_col = "ensg_id", 
+                          enr_fold = 4, 
+                          max_group_n = 5, 
+                          det_lim = 1)
+
+
+joined_classes <- 
+  pig_gene_classification_2 %>% 
+  select(1:4, enriched_tissues) %>%
+  left_join(pig_gene_classification,
+            by = c("gene" = "ensg_id")) 
+  
+joined_classes %>%
+  group_by(spec_category, specificity_category) %>% 
+  summarise(n = n())
+
+joined_classes %>% 
+  mutate(enhanced_tissues = gsub(",", ";", enhanced_tissues),
+         enriched_tissues = gsub(" 1", "", enriched_tissues),
+         same_enr = enhanced_tissues == enriched_tissues) %>%
+  filter(!same_enr)
+```
+
+#Data generation
+
+##Data tables for saving
+
+```{r tables_for_saving, echo=FALSE, message=FALSE, warning=FALSE}
+
+pig_gene_classification %>% 
+  left_join(gene_orthologs) %>% 
+  left_join(human_gene_class %>% 
+              select(1:4),
+            by = "ensg_id") %>% 
+  left_join(human_gene_mapping) %>% 
+  select(enssscg_id, ensg_id, gene_name, ortholog_type, 2, 3, 4, 5, 6, 
+         specificity_human = spec_category,
+         specificity_human = dist_category,
+         enhanced_tissues_human = enriched_tissues) %>% 
+  write_csv(savepath("Pig class table.csv"))
+
+```
+
+
+##Normalization
+
+```{r normalization, echo=FALSE, message=FALSE, warning=FALSE}
+pig_atlas_sample <- 
+  pig_atlas_sample_temp %>% 
+  group_by(sample_ID) %>% 
+  group_by(sample_ID) %>% 
+  mutate(sum_tpm = sum(tpm), 
+         ptpm = tpm * 1e6 / sum_tpm) %>% 
+  select(-sum_tpm) %>% 
+  ungroup()
+
+# Create wide format sample data
+pig_atlas_sample_wide_ptpm <- 
+  pig_atlas_sample %>%
+  select(1, 2, ptpm) %>%
+  spread(key = sample_ID, value = ptpm) %>%
+  column_to_rownames("enssscg_id")
+
+# TMM normalize sample data
+pig_atlas_sample_wide_tmm <- 
+  pig_atlas_sample_wide_ptpm %>%
+  tmm_norm_median_ref()
+  
+# Create long format normalized sample data
+pig_atlas_sample_norm <- 
+  pig_atlas_sample %>% 
+  left_join(pig_atlas_sample_wide_tmm %>% 
+              as_tibble(rownames = "enssscg_id") %>%
+              gather("sample_ID", "tmm", -1),
+            by = c("enssscg_id", "sample_ID")) %>%
+  group_by(enssscg_id) %>%
+  mutate(nx = case_when(tpm == 0 ~ 0, 
+                        T ~ tmm/sqrt(sd(tmm)))) %>% 
+  ungroup()
+
+
+# Aggregate to tissue data
+pig_atlas_tissue <- 
+  pig_atlas_sample_norm %>% 
+  group_by(enssscg_id, tissue_ID) %>% 
+  summarise(tpm = mean(tpm), 
+            ptpm = mean(ptpm), 
+            tmm = mean(tmm), 
+            nx = mean(nx)) %>% 
+  ungroup()
+
+```
+
+
+##Aggregation
+
+```{r}
+
+pig_atlas_comparison <- 
+  pig_atlas_tissue %>% 
+  inner_join(tissue_mapping %>% 
+               select(tissue, comparison_tissue), 
+             by = c("tissue_ID" = "tissue")) %>%
+  group_by(enssscg_id, comparison_tissue) %>% 
+  summarise(tpm = max(tpm), 
+            ptpm = max(ptpm), 
+            tmm = max(tmm),
+            nx = max(nx)) %>% 
+  ungroup() %>% 
+  filter(!is.na(comparison_tissue))
+
+human_atlas_comparison <- 
+  human_atlas_tissue %>% 
+  inner_join(human_tissue_mapping, 
+             by = "tissue_name") %>% 
+    group_by(comparison_tissue, ensg_id) %>% 
+    summarise(tpm = max(tpm, na.rm = T),
+              ptpm = max(ptpm, na.rm = T),
+              tmm = max(tmm, na.rm = T),
+              nx = max(nx, na.rm = T)) %>% 
+  ungroup() %>% 
+  filter(!is.na(comparison_tissue)) %>%
+  filter(comparison_tissue %in% pig_atlas_comparison$comparison_tissue)
+```
+
+
+##PCA
+
+```{r}
+sample_pca <-
+  pig_atlas_sample_norm %>% 
+  group_by(enssscg_id) %>% 
+  mutate(sd = sd(tmm)) %>%
+  ungroup() %>% 
+  filter(sd > 0) %>%
+  select(enssscg_id, sample_ID, tmm) %>% 
+  
+  spread(enssscg_id, tmm) %>%
+  column_to_rownames("sample_ID") %>%
+  {. + 1} %>%
+  compositions::clr() %>%
+  as.data.frame() %>%
+  pca_calc(npcs = 150)
+
+
+
+
+tissue_pca <-
+  pig_atlas_tissue %>% 
+  left_join(tissue_mapping,
+            by = c("tissue_ID" = "tissue")) %>%
+  group_by(enssscg_id) %>% 
+  mutate(sd = sd(tmm)) %>%
+  ungroup() %>% 
+  filter(sd > 0) %>%
+  select(enssscg_id, tissue_name, tmm) %>% 
+  
+  spread(enssscg_id, tmm) %>%
+  column_to_rownames("tissue_name") %>%
+  {. + 1} %>%
+  compositions::clr() %>%
+  as.data.frame() %>%
+  pca_calc(npcs = 50)
+
+```
+
+## Basic gene stats
+
+```{r}
+basic_gene_stats <- 
+  pig_atlas_sample %>%
+  select(1, 2, ptpm) %>% 
+  group_by(enssscg_id) %>% 
+  summarise(sd = sd(ptpm),
+            mean = mean(ptpm),
+            median = median(ptpm),
+            max = max(ptpm),
+            fract_0 = length(which(ptpm < 0.1)) / length(ptpm)) %>%
+  ungroup() %>% 
+  mutate(CV = 100 * sd / mean)
+
+basic_gene_stats %>% 
+  filter(max >= 1) 
+
+basic_gene_stats %>% 
+  ggplot(aes(fract_0)) +
+  geom_histogram() +
+  
+  basic_gene_stats %>% 
+  ggplot(aes(sd)) +
+  geom_density() +
+  scale_x_log10() +
+  
+  basic_gene_stats %>% 
+  ggplot(aes(CV)) +
+  geom_histogram()
+
+
+```
+
+
+##Correlation
+
+###Proportionality
+
+```{r}
+
+if(file.exists("data/processed/pig_gene_propr.Rdata")) {
+  load("data/processed/pig_gene_propr_res.Rdata")
+  
+} else {
+  pig_gene_propr <- 
+    pig_atlas_sample %>%
+    select(1, 2, ptpm) %>% 
+    spread(enssscg_id, ptpm) %>%
+    column_to_rownames("sample_ID") %>% 
+    {. + 1} %>%
+    propr()
+  
+  pig_gene_propr_res <- 
+    pig_gene_propr@matrix
+  save(pig_gene_propr,
+       file = "data/processed/pig_gene_propr.Rdata")
+  save(pig_gene_propr_res,
+       file = "data/processed/pig_gene_propr_res.Rdata")
+  rm(pig_gene_propr)
+    
+} 
+
+if(file.exists("data/processed/pig_gene_propr_filtered.Rdata")) {
+  load("data/processed/pig_gene_propr_filtered.Rdata")
+  
+} else {
+  pig_gene_propr_res_05filtered <- 
+    pig_gene_propr_res %>% 
+    {temp <- .; temp[!upper.tri(temp)] <- NA; temp} %>%
+    as_tibble(rownames = "enssscg_id1") %>%
+    gather(enssscg_id2, prop, -1, na.rm = T) %>% 
+    filter(abs(prop) > 0.5)
+  
+  save(pig_gene_propr_res_05filtered,
+       file = "data/processed/pig_gene_propr_filtered.Rdata")
+  
+} 
+
+```
+
+###Spearman
+
+```{r}
+
+if(file.exists("data/processed/pig_gene_spearman.Rdata")) {
+  load("data/processed/pig_gene_spearman.Rdata")
+  
+} else {
+  pig_gene_spearman_data <- 
+    pig_atlas_sample %>%
+    select(1, 2, ptpm) %>%
+    spread(enssscg_id, ptpm) %>%
+    column_to_rownames("sample_ID") 
+  
+  # To calculate spearman correlation for all combination of genes is computationally expensive and not really desirable,
+  # therefore we filter genes that have max ptpm < 1, and only consider combinations that have absolute proportionality > 0.5 
+  filtered_genes <- 
+    basic_gene_stats %>% 
+    filter(max >= 1) %>% 
+    pull(enssscg_id)
+  
+  
+  
+  
+  tot_combs <- 
+    pig_gene_propr_res_05filtered %>%
+    filter(enssscg_id1 %in% filtered_genes & enssscg_id2 %in% filtered_genes) %>% nrow
+  n_gn <- 1000
+  gene_combinations <- 
+    pig_gene_propr_res_05filtered %>%
+    filter(enssscg_id1 %in% filtered_genes & enssscg_id2 %in% filtered_genes) %>% 
+    select(1:2) %>%
+    head(n_gn)
+  
+  t1 <- Sys.time()
+  gene_combinations %>%
+    group_by(enssscg_id1, enssscg_id2) %>%
+    do({
+      cor.test(pig_gene_spearman_data[,.$enssscg_id1],
+               pig_gene_spearman_data[,.$enssscg_id2], 
+               method = "spearman") %>%
+        tidy()
+    })
+  
+  # rcorr()
+  # a <- lapply(1:nrow(gene_combinations),
+  #             function(i) {
+  #               cor.test(pig_gene_spearman_data[,gene_combinations$enssscg_id1[i]],
+  #                        pig_gene_spearman_data[,gene_combinations$enssscg_id2[i]])%>%
+  #       tidy()
+  #             })
+  
+  tm <- Sys.time() - t1
+  tm_per <- tm/nrow(gene_combinations)
+  tm_tot<- tm_per * tot_combs
+  
+  tm_tot / 3600
+  ((object.size(a)/nrow(gene_combinations)) * tot_combs)/10^9
+  
+  
+  gene_combinations %>%
+    left_join(pig_gene_spearman_data,
+              c("V1" = "enssscg_id")) %>%
+    left_join(pig_gene_spearman_data,
+              c("V2" = "enssscg_id", "sample_ID"),
+              suffix = c("1", "2")) 
+    
+  
+  pig_gene_propr_res <- 
+    pig_gene_propr@matrix
+  save(pig_gene_propr,
+       file = "data/processed/pig_gene_spearman.Rdata")
+  save(pig_gene_propr_res,
+       file = "data/processed/pig_gene_spearman.Rdata")
+  rm(pig_gene_propr)
+    
+} 
+
+```
+
+##Classification
+
+###Generate comparison classification
+
+```{r comparison_class, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+pig_gene_class_comparison <- 
+  hpa_gene_classification(data = pig_atlas_comparison,
+                          expression_col = "nx",
+                          tissue_col = "comparison_tissue",
+                          gene_col = "enssscg_id",
+                          enr_fold = 4,
+                          max_group_n = 5,
+                          det_lim = 1)
+write_delim(pig_gene_class_comparison, savepath("Pig gene comparison classification.txt"), delim = "\t")
+
+
+human_gene_class_comparison <- 
+  hpa_gene_classification(data = human_atlas_comparison,
+                          expression_col = "nx",
+                          tissue_col = "comparison_tissue",
+                          gene_col = "ensg_id",
+                          enr_fold = 4,
+                          max_group_n = 5,
+                          det_lim = 1)
+write_delim(human_gene_class_comparison, savepath("Human gene comparison classification.txt"), delim = "\t")
+
+
+```
+
+
+###Human-pig comparison
+
+```{r humanpig_class_comparison, echo=FALSE, message=FALSE, warning=FALSE}
+
+human_pig_gene_class_comparison_long <- 
+  full_join(gene_orthologs %>% 
+              left_join(human_gene_class_comparison %>%
+                          separate_rows(enriched_tissues, sep = ";") %>% 
+                          select(ensg_id = gene,
+                                 enriched_tissues, 
+                                 spec_score, 
+                                 spec_category,
+                                 dist_category), 
+                        by = "ensg_id") %>% 
+              mutate(comparison_id = enriched_tissues),
+            
+            
+            gene_orthologs %>% 
+              left_join(pig_gene_class_comparison %>%
+                          separate_rows(enriched_tissues, sep = ";") %>% 
+                          select(enssscg_id = gene,
+                                 enriched_tissues, 
+                                 spec_score, 
+                                 spec_category, 
+                                 dist_category), 
+                        by = "enssscg_id") %>% 
+              mutate(comparison_id = enriched_tissues),
+            by = c("enssscg_id", "ensg_id", "ortholog_type", "comparison_id"), 
+            suffix = c("_human", "_pig")) %>% 
+  select(1, 2, 3, enriched_tissues_human, enriched_tissues_pig, comparison_id, everything()) 
+
+# human_pig_gene_class_comparison_long %>% 
+#   filter(grepl("heart|intestine", comparison_id)) %>% View
+  
+         
+
+         
+         
+human_pig_gene_class_comparison <- 
+  human_pig_gene_class_comparison_long %>% 
+  group_by(enssscg_id, ensg_id, ortholog_type) %>% 
+  summarise(n_enriched_human = n_distinct(enriched_tissues_human, na.rm = T),
+            n_enriched_pig = n_distinct(enriched_tissues_pig, na.rm = T),
+            
+            
+            # Tissues count as overlapping if enriched in both human and pig, and the tissue is common in both datasets
+            n_enriched_overlap = length(which((!is.na(enriched_tissues_human) & !is.na(enriched_tissues_pig)))),
+            n_enriched_total = n_enriched_human + n_enriched_pig - n_enriched_overlap,
+            
+            enriched_tissues_overlap = paste(comparison_id[which(!is.na(enriched_tissues_human) & !is.na(enriched_tissues_pig))], 
+                                             collapse = ";"),
+            enriched_tissues_human = paste(enriched_tissues_human[which(!is.na(enriched_tissues_human))], 
+                                           collapse = ";"),
+            enriched_tissues_pig = paste(enriched_tissues_pig[which(!is.na(enriched_tissues_pig))], 
+                                         collapse = ";"),
+            
+            enrichment_overlap = case_when(n_enriched_overlap == 0 ~ "no overlap", #n_enriched_total == 0 ~ "no enrichment", 
+                                           n_enriched_overlap == n_enriched_total ~ "full overlap",
+                                           n_enriched_overlap > 0 ~ "partial overlap")
+            ) %>% 
+  left_join(human_gene_class_comparison %>%
+              select(ensg_id = gene,
+                     dist_category,
+                     spec_category,
+                     spec_score),
+            by = "ensg_id") %>% 
+  left_join(pig_gene_class_comparison %>%
+              select(enssscg_id = gene,
+                     dist_category,
+                     spec_category,
+                     spec_score),
+            by = "enssscg_id",
+            suffix = c("_human", "_pig")) %>%
+  
+  mutate(dist_category_human_n = match(dist_category_human, dist_category_levels), 
+         spec_category_human_n = match(spec_category_human, spec_category_levels), 
+         dist_category_pig_n = match(dist_category_pig, dist_category_levels), 
+         spec_category_pig_n = match(spec_category_pig, spec_category_levels), 
+         dist_cat_diff = dist_category_human_n - dist_category_pig_n,
+         spec_cat_diff = spec_category_human_n - spec_category_pig_n,
+         shared_dist_category = case_when(abs(dist_cat_diff) == 0 ~ "shared",
+                                          abs(dist_cat_diff) == 1 ~ "minor difference",
+                                          abs(dist_cat_diff) == 2 ~ "medium difference",
+                                          abs(dist_cat_diff) >= 3 ~ "major difference"),
+         shared_spec_category = case_when(abs(spec_cat_diff) == 0 ~ "shared",
+                                          abs(spec_cat_diff) == 1 ~ "minor difference",
+                                          abs(spec_cat_diff) == 2 ~ "medium difference",
+                                          abs(spec_cat_diff) >= 3 ~ "major difference")) %>% 
+  ungroup()
+```
+
+#Figures
+
+##Figure 1
+
+###PCA
+```{r Figure1_PCA, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+
+g <- 
+  sample_pca$scores %>%
+  as_tibble(rownames = "sample_id") %>%
+  separate(sample_id, into = c("tissue_id", "individual"), sep = "_", remove = F) %>%
+  
+  left_join(tissue_mapping,
+            by = c("tissue_id" = "tissue")) %>%
+  
+  mutate(x = PC1, 
+         y = PC2, 
+         tissue_color = organ_name) %>%
+  mutate(tissue_color = factor(tissue_color, 
+                               levels = c('Adipose & soft tissue',
+                                          'Brain',
+                                          'Bone marrow & immune system',
+                                          'Breast and female reproductive system',
+                                          'Male reproductive system',
+                                          
+                                          'Gastrointestinal tract',
+                                          'Proximal digestive tract',
+                                          'Respiratory system',
+                                          'Eye',
+                                          'Liver & gallbladder',
+                                          'Kidney & urinary bladder',
+                                          'Endocrine tissues',
+                                          'Muscle tissues',
+                                          'Skin'))) %>%
+  
+  ggplot(aes(x, y, color = tissue_color, fill = tissue_color)) +
+  
+  
+  geom_point(show.legend = T, 
+             shape = 21, 
+             color = "gray25", 
+             size = 2.5, 
+             alpha = 0.7) +
+  # geom_text(aes(label = group_col ), hjust = 0) +
+  
+  
+  scale_color_manual(values = tissue_colors_palette_full, name = "") +
+  scale_fill_manual(values = tissue_colors_palette_full, name = "") +
+  # 
+  # scale_x_continuous(limits = c(plot_lims_x)) + 
+  # scale_y_continuous(limits = c(plot_lims_y)) +
+  
+  
+  # coord_fixed((plot_lims_x[1] - plot_lims_x[2]) /
+  #               (plot_lims_y[1] - plot_lims_y[2])) +
+  
+  facet_zoom(xy = organ_name == "Brain", horizontal = F, zoom.size = 0.5) +
+  
+  
+  xlab("PC1") +
+  ylab("PC2") + 
+  stripped_theme +
+  theme(plot.title = element_text(hjust = 0.5), 
+        panel.border = element_blank(), 
+        panel.background = element_blank())
+
+ggsave(savepath("Figure1 PCA 1.pdf"), plot = g, width = 8, height = 7, useDingbats = F)
+ggsave(savepath("Figure1 PCA 1 no legend.pdf"), plot = g + theme(legend.position = "none"), 
+       width = 8, height = 7, useDingbats = F)
+ggsave(savepath("Figure1 PCA 1 no legend small.pdf"), plot = g + theme(legend.position = "none"), 
+       width = 4, height = 7, useDingbats = F)
+
+g <- 
+  sample_pca$scores %>%
+  as_tibble(rownames = "sample_id") %>%
+  separate(sample_id, into = c("tissue_id", "individual"), sep = "_", remove = F) %>%
+  
+  left_join(tissue_mapping,
+            by = c("tissue_id" = "tissue")) %>%
+  
+  mutate(x = PC1, 
+         y = PC2, 
+         tissue_color = ifelse(x > 5, 
+                               region_tissue_name,
+                               "")) %>%
+  mutate(tissue_color = str_to_sentence(tissue_color)) %>%
+  
+  ggplot(aes(x, y, color = tissue_color, fill = tissue_color)) +
+  
+  
+  geom_point(show.legend = T, 
+             shape = 21, 
+             color = "gray25", 
+             size = 2.5, 
+             alpha = 0.7) +
+  
+  scale_color_manual(values = tissue_colors_palette_full, name = "") +
+  scale_fill_manual(values = tissue_colors_palette_full, name = "") +
+  facet_zoom(xy = organ_name == "Brain", horizontal = F, zoom.size = 0.5) +
+  
+  
+  xlab("PC1") +
+  ylab("PC2") + 
+  stripped_theme +
+  theme(plot.title = element_text(hjust = 0.5), 
+        panel.border = element_blank(), 
+        panel.background = element_blank())
+
+ggsave(savepath("Figure1 PCA 2.pdf"), plot = g, width = 8, height = 7, useDingbats = F)
+ggsave(savepath("Figure1 PCA 2 no legend.pdf"), plot = g + theme(legend.position = "none"), 
+       width = 8, height = 7, useDingbats = F)
+ggsave(savepath("Figure1 PCA 2 no legend small.pdf"), plot = g + theme(legend.position = "none"), 
+       width = 4, height = 7, useDingbats = F)
+```
+
+###Spearman correlation
+```{r Figure1_spearman, echo=FALSE, message=FALSE, warning=FALSE}
+
+pig_atlas_consensus %>% 
+  select(enssscg_id, tissue, tpm) %>% 
+  mutate(tissue = str_to_sentence(tissue)) %>%
+  spread(enssscg_id, tpm) %>%
+  column_to_rownames("tissue")  %>%
+  t() %>%
+  cor(method = "spearman") %T>%
+  {g_data <- .
+  cluster_ <- g_data %>% 
+    {1 - .} %>%
+    as.dist() %>% 
+    hclust(method = "average")
+  pheatmap(g_data, 
+           color = heatmap_palette,
+           border_color = NA,
+           cluster_cols = cluster_,
+           cluster_rows = cluster_,
+           
+           filename = savepath("Figure1 spearman heatmap average spearman.pdf"),
+           width = 7.8, height = 7.2)
+  } %>%
+  pheatmap(color = heatmap_palette,
+           border_color = NA,
+           clustering_method = "ward.D2",
+           
+           filename = savepath("Figure1 spearman heatmap ward spearman.pdf"),
+           width = 7.8, height = 7.2)
+```
+
+###Retinagram
+```{r Figure1_retina, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+tissue_wardclust <- 
+  # tissue_pca$scores[, 1:50] %>% 
+  tissue_pca$scores[, 1:50] %>% 
+  # set_rownames(tissue_colors$tissue_name[match(rownames(.), tissue_colors$tissue)]) %>%
+  dist() %>% 
+  hclust(method = "ward.D2")
+
+tissue_spearclust <-
+  pig_atlas_tissue_name_wide_nx %>%
+  cor(method = "spearman") %>%
+  {1 - .} %>%
+  as.dist() %>%
+  hclust(method = "ward.D2")
+
+circular_dendrogram_retinastyle_2(clust = tissue_wardclust, 
+                                color_mapping = tissue_colors, 
+                                label_col = "tissue_name", 
+                                color_col = "tissue_color", arc_strength = 0)
+
+tissue_spearclust <-
+  pig_atlas_tissue %>% 
+  
+  left_join(tissue_mapping,
+            by = c("tissue_ID" = "tissue")) %>%
+  select(enssscg_id, tissue_name, tmm) %>% 
+  
+  spread(enssscg_id, tmm) %>%
+  column_to_rownames("tissue_name")  %>%
+  t() %>%
+  cor(method = "spearman") %>%
+  {1 - .} %>%
+  as.dist() %>%
+  hclust(method = "ward.D2")
+
+circular_dendrogram_retinastyle_2(clust = tissue_spearclust, 
+                                color_mapping = tissue_colors, 
+                                label_col = "tissue_name", 
+                                color_col = "tissue_color", arc_strength = 0)
+ggsave(savepath("Figure1 retinagram.pdf"), width = 10, height = 10)
+```
+
+
+
+
+
+##Figure 2
+
+###Classification alluvial
+
+```{r Pig_class_alluvial, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+
+  
+  multi_alluvial_plot(vars = c("Specificity" = "spec_category", 
+                               "Distribution" = "dist_category"), 
+                      chunk_levels = c('Tissue enriched', 'Group enriched', 
+                                       'Tissue enhanced', 'Low tissue specificity', 
+                                       'Detected in single',
+                                       'Detected in some', 
+                                       'Detected in many', 
+                                       'Detected in all',
+                                       'Not detected'), 
+                      pal = c(gene_category_pal, elevation_identity_pal), 
+                      color_by = c(1, 1)) +
+  coord_flip()
+
+
+selvars = vars
+
+
+alluv_1 <-
+  
+    
+      
+  pig_gene_classification %>%
+   mutate(spec_category = str_to_sentence(specificity_category),
+         dist_category = str_to_sentence(distribution_category)) %>%
+  select(spec_category,
+         dist_category) %>%
+  mutate(row_n = row_number()) %>%
+  gather(bar, chunk, -row_n) %>%
+  mutate(color_vars = 1) %>%
+      group_by(row_n) %>%
+      mutate(chunk_color = chunk[match(c("spec_category",
+                                         "dist_category")[color_vars], bar)]) %>% 
+      ungroup() %>%
+ 
+  
+  mutate(chunk = factor(chunk, levels = c('Tissue enriched', 'Group enriched', 
+                                          'Tissue enhanced', 'Low tissue specificity', 
+                                          'Detected in single',
+                                          'Detected in some', 
+                                          'Detected in many', 
+                                          'Detected in all',
+                                          'Not detected')),
+         bar = factor(bar, levels = c("spec_category",
+                                         "dist_category"))) %>%
+  
+  
+  ggplot(aes(x = bar, stratum = chunk, alluvium = row_n,
+             y = 1)) +
+  
+  geom_flow(aes(fill = chunk_color), 
+            show.legend = F) +
+  geom_stratum(aes(fill = chunk), 
+               show.legend = F, color = NA) +
+  
+  scale_x_discrete(expand = c(.1, .1), position = "top") +
+  scale_fill_manual(values = c(gene_category_pal, elevation_identity_pal)) + 
+  
+  
+  theme(axis.text.y = element_text(size = 18, face = "bold"),
+        axis.text.x = element_blank(), 
+        axis.ticks = element_blank(), 
+        panel.background = element_blank(), 
+        axis.title = element_blank()) +
+  coord_flip()
+
+
+
+flow_data <- 
+  ggplot_build(alluv_1)$data[[1]]  
+
+stratum_data <- 
+  ggplot_build(alluv_1)$data[[2]]
+
+flow_data_labels <-
+  flow_data %>% 
+  as_tibble() %>% 
+  select(x, stratum, group, side, ymin, ymax) %>% 
+  multispread(c(side), c(x, stratum, ymin, ymax)) %>% 
+  mutate_at(c("end_x", "end_ymax", "end_ymin", "start_x", "start_ymax", "start_ymin"), as.numeric) %>% 
+  group_by(start_stratum, end_stratum, start_x, end_x) %>%
+  summarise(end_y = (min(end_ymin) + max(end_ymax)) / 2, 
+            start_y = (min(start_ymin) + max(start_ymax)) / 2, 
+            size = max(start_ymax) - min(start_ymin))
+alluv_1 <- 
+  alluv_1 +
+  geom_text(data = flow_data_labels,
+            aes(x = start_x + 1/6,
+                y = start_y, 
+                label = size), 
+            inherit.aes = F, 
+            size = 3, 
+            hjust = 0.5,
+            vjust = 0) +
+  geom_text(data = flow_data_labels,
+            aes(x = end_x - 1/6,
+                y = end_y, 
+                label = size), 
+            inherit.aes = F, 
+            size = 3, 
+            hjust = 0.5,
+            vjust = 1) +
+  
+  # Stratum label
+  
+  geom_text(data = stratum_data,
+            aes(x = x, 
+                y = y,
+                label = paste(stratum, 
+                              ymax - ymin, sep = "\n")), 
+            size = 4, 
+            inherit.aes = F)
+
+
+alluv_1
+
+ggsave(savepath("Figure2 Alluvial.pdf"), width = 15, height = 5, useDingbats = F)
+
+```
+
+###Classification barplot
+
+```{r Figure2_classification_bar, echo=FALSE, message=FALSE, warning=FALSE}
+
+class_table_temp <-
+  pig_gene_classification %>%
+  select(enssscg_id, specificity_category, enhanced_tissues) %>%
+  separate_rows(enhanced_tissues, sep = ",") %>%
+  mutate(spec_category = factor(specificity_category, levels = rev(spec_category_levels)),
+         enhanced_tissues = str_to_sentence(enhanced_tissues))
+  
+plot_dendro <-
+  pig_atlas_consensus %>% 
+  select(enssscg_id, tissue, tpm) %>% 
+  mutate(tissue = str_to_sentence(tissue)) %>%
+  spread(enssscg_id, tpm) %>%
+  column_to_rownames("tissue")  %>%
+  t() %>%
+  cor(method = "spearman") %>%
+  
+  {1 - .} %>%
+  as.dist() %>% 
+  hclust(method = "average") %T>%
+  plot %>%
+  dendro_data()
+  
+  
+dendro_plot_data <- 
+  left_join(plot_dendro$segments, 
+            plot_dendro$labels, 
+            by = c("x" = "x", "yend" = "y")) 
+
+left_plot <- 
+  dendro_plot_data %>%
+  ggplot() +
+  geom_segment(aes(x=y, y=x, xend=yend, yend=xend, group = label))+
+  geom_rect(aes(xmin=0, ymin=x + 0.5, 
+                xmax=-0.02, ymax=xend - 0.5, 
+                fill = label), 
+            show.legend = F) +
+  scale_color_manual(values = tissue_colors_palette_full)+
+  scale_fill_manual(values = tissue_colors_palette_full)+
+  scale_x_reverse(expand = expansion(0), position = "top")+
+  scale_y_continuous(expand = expansion()) +
+  
+  theme(axis.text.y = element_blank(), 
+        axis.title = element_blank(), 
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(1,1,1,1), units = "mm"), 
+        panel.background = element_blank()) 
+
+right_plot <- 
+  class_table_temp %>%
+  filter(!is.na(enhanced_tissues)) %>%
+  group_by(enhanced_tissues, specificity_category) %>%
+  summarise(n_genes = n()) %>%
+  ungroup() %>%
+  mutate(enhanced_tissues = factor(enhanced_tissues, levels = plot_dendro$labels$label),
+         specificity_category = factor(specificity_category, rev(spec_category_levels))) %>%
+  ggplot(aes(n_genes, enhanced_tissues, fill = specificity_category)) +
+  geom_col(width = 0.8, size = 0.1) +
+  simple_theme +
+  scale_fill_manual(values = gene_category_pal, name = "Specificity") +
+  # coord_flip() +
+  xlab("Tissue") +
+  ylab("Number of genes") +
+  scale_x_continuous(position = "top", expand = expansion(c(0, 0.1))) + 
+  scale_y_discrete(expand = expansion()) +
+  
+  theme(axis.text.y = element_text(hjust = 0.5), 
+        legend.position = c(0.7, 0.5),
+        axis.title.y = element_blank(),
+        panel.border = element_blank())
+
+left_plot + right_plot 
+
+ggsave(savepath("Figure2 barplot.pdf"), width = 6, height = 7)
+```
+
+###Classification network
+
+```{r Figure2_classification_network, echo=FALSE, message=FALSE, warning=FALSE}
+pig_enrichment_whole_group <- 
+  pig_gene_classification %>% 
+  select(1, spec_category = specificity_category, enriched_tissues = enhanced_tissues) %>% 
+  filter(spec_category %in% c("Tissue enriched", "Group enriched")) %>% 
+  group_by(enriched_tissues, spec_category) %>% 
+  summarise(n_genes = n()) %>%
+  ungroup()
+
+pig_net_data <-
+  pig_enrichment_whole_group %>% 
+  mutate(all_enriched_tissues = enriched_tissues) %>%
+  separate_rows(enriched_tissues, sep = ",") %>%
+  group_by(enriched_tissues, spec_category) %>% 
+  mutate(rank = rank(-n_genes, ties.method = "min")) %>%
+  group_by(all_enriched_tissues) %>%
+  mutate(any_low_rank = any(rank <= 2)) %>%
+  ungroup() %>%
+  
+  filter((spec_category == "tissue enriched" | any_low_rank | n_genes >= 8) &
+           (spec_category == "tissue enriched" | n_genes >= 2)) %>% 
+  mutate(edge_id = paste("enriched:", all_enriched_tissues)) %>% 
+    arrange(n_genes)
+  
+pig_net_edges <- 
+  pig_net_data %$% 
+  tibble(node1 = enriched_tissues, node2 = edge_id, n = n_genes) %>% 
+  unique()
+
+g <-
+  pig_net_edges %>%
+  graph_from_data_frame(directed = FALSE) %>%
+  ggraph(layout = "kk") 
+
+link_map <- 
+  pig_net_edges %>% 
+  gather(node, id, -(3:4)) %>% 
+  mutate(tissue_node = node == "node1", 
+         color_id = ifelse(tissue_node, id, !grepl(",", id)), 
+         label = ifelse(tissue_node, color_id, n)) %>%
+  select(n, node, id, tissue_node, color_id, label) %>%
+  unique()
+
+
+edge_data <- get_edges()(g$data)
+node_data <- 
+  get_nodes()(g$data) %>% 
+  as_tibble() %>%
+  left_join(link_map, 
+            by = c("name" = "id")) 
+  
+
+g + 
+  geom_edge_arc(aes(width = n), 
+                    color = "gray", 
+                strength = 0, 
+                show.legend = F) + 
+    scale_edge_alpha_continuous(range = c(0.3, 1)) +
+    scale_edge_width_continuous(range = c(1, 3)) +
+  
+  geom_node_point(data = node_data  %>%
+                    filter(!tissue_node),
+                  aes(size = log(n), 
+                      fill = color_id), 
+                  stroke = 1,
+                  # size = 10,
+                  shape = 21,
+                  show.legend = F)+
+  geom_node_point(data = node_data %>%
+                    filter(tissue_node),
+                  aes(fill = color_id), 
+                  stroke = 1,
+                  size = 20,
+                  shape = 21,
+                  show.legend = F)+
+  geom_node_text(data = node_data,
+                 aes(label = label),
+                 size = 4) +
+  scale_size_continuous(range = c(5, 10)) +
+  scale_fill_manual(values = c(tissue_colors_palette_full, gene_category_pal)) +
+  
+  theme_void()
+
+ggsave(savepath("Network pig enrichment whole group.pdf"), width = 16, height = 12, useDingbats = F)
+ggsave(savepath("Network pig enrichment whole group.png"), width = 16, height = 12)
+
+
+# Save for cytoscape
+pig_net_edges
+pig_net_data
+
+cyto_summary <- 
+  pig_net_edges %>% 
+  mutate(category = ifelse(!grepl(",", node2), "Tissue enriched", "Group enriched"), 
+         node_id = unclass(factor(node2)),
+         node1 = str_to_sentence(node1), 
+         n_sqrt = sqrt(n), 
+         str_len = str_length(node1)) %>%
+  select(category, node1, node2, node_id, n, n_sqrt, str_len) 
+
+cyto_summary %T>% 
+  write_delim(savepath("cytoscape nodes summary whole group.txt"), delim = "\t") %>%
+  write_csv(savepath("cytoscape nodes summary whole group.csv"))
+
+bind_rows(cyto_summary %>% 
+            left_join(tissue_colors_palette_full %>% 
+                        enframe("node1", "color")) %>% 
+            select(node_id = node1, 
+                   color) %>% 
+            unique() %>%
+            mutate(node_type = "Tissue"),
+          cyto_summary %>% 
+            mutate(color = case_when(category == "Tissue enriched" ~ "#e41a1c",
+                                     category == "Group enriched" ~ "#FF9D00"), 
+                   node_id = as.character(node_id)) %>%
+            select(node_id, color) %>% 
+            unique() %>%
+            
+            mutate(node_type = "Enrichment")) %>%
+  mutate(color2 = case_when(node_type == "Enrichment" ~ color,
+                            node_type == "Tissue" ~ "#D3D3D3FF"),
+         color3 = case_when(node_type == "Enrichment" ~ color,
+                            node_type == "Tissue" ~ "#BEBEBEFF")) %T>% 
+  
+  write_delim(savepath("cytoscape nodes color whole group.txt"), delim = "\t") %>%
+  write_csv(savepath("cytoscape nodes color whole group.csv"))
+
+bind_rows(cyto_summary %>% 
+            select(node_id = node1) %>% 
+            mutate(label = node_id) %>%
+            unique(),
+          cyto_summary %>% 
+            mutate(node_id = as.character(node_id), 
+                   label = as.character(n)) %>%
+            select(node_id, label) %>% 
+            unique()) %T>% 
+  write_delim(savepath("cytoscape nodes label whole group.txt"), delim = "\t") %>%
+  write_csv(savepath("cytoscape nodes label whole group.csv"))
+```
+
+##Figure 3
+
+###Human-pig alluvial
+
+```{r Figure3_humanpig_alluvial, echo=FALSE, message=FALSE, warning=FALSE}
+
+gene_overlap_data <- 
+  human_pig_gene_class_comparison_long %>% 
+  filter(ortholog_type == "ortholog_one2one") %>%
+  left_join(human_gene_class_comparison %>%
+              select(1:2),
+            by = c("ensg_id" = "gene")) %>%
+  left_join(pig_gene_class_comparison %>%
+              select(1:2),
+            by = c("enssscg_id" = "gene"), 
+            suffix = c("_human", "_pig")) %>%
+  filter(!is.na(comparison_id)) %>%
+  
+  group_by(comparison_id, enssscg_id, ensg_id, spec_score_human, spec_score_pig) %>%
+  summarise(type = case_when(any(!is.na(enriched_tissues_human) & 
+                                   !is.na(enriched_tissues_pig)) ~ "Overlap",
+                             all(is.na(enriched_tissues_human)) ~ "Pig", 
+                             all(is.na(enriched_tissues_pig)) ~ "Human")) %>%
+  ungroup()
+
+
+gene_overlap_data %>% 
+  group_by(comparison_id, type) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {
+                                  filter(., type == "Overlap") %$%
+                                    comparison_id[order(n)]
+                                })) %>%
+  ggplot() + 
+  geom_col(mapping = aes(comparison_id, n,fill = type)) + 
+  
+  geom_text(data = . %>% 
+              filter(type == "Pig"),
+            aes(x = comparison_id, y = 0,
+                label = n), 
+            hjust = 1) +
+  geom_text(data = . %>% 
+              group_by(comparison_id) %>%
+              summarise(y = n[which(type == "Overlap")] / 2 + 
+                          n[which(type == "Pig")], 
+                        label = n[which(type == "Overlap")]),
+            aes(x = comparison_id, y = y,
+                label = label), 
+            hjust = 0.5, 
+            color = "white") +
+  geom_text(data = . %>% 
+              group_by(comparison_id) %>%
+              summarise(y = sum(n), 
+                        label = n[which(type == "Human")]),
+            aes(x = comparison_id, y = y,
+                label = label), 
+            hjust = 0) +
+  
+  coord_flip() + 
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_y_continuous(expand = expand_scale(0.13)) +
+  
+  theme(axis.text.y = element_text(face = "bold"), 
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(),
+        
+        legend.position = c(0.5, 0.5))
+ggsave(savepath("enrichment overlap barplot.pdf"), width= 5, height = 8)
+
+
+####
+gene_overlap_data %>% 
+  mutate(enrichment_score = case_when(type == "Overlap" ~ (spec_score_human + spec_score_pig) / 2,
+                                      type == "Human" ~ spec_score_human,
+                                      type == "Pig" ~ spec_score_pig)) %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {filter(., type == "Overlap") %>%
+                                    group_by(comparison_id) %>%
+                                    summarise(enrichment_score = median(enrichment_score)) %$%
+                                    comparison_id[order(enrichment_score)]})) %>%
+  ggplot(aes(type, enrichment_score ,fill = type)) + 
+  
+  geom_violin(draw_quantiles = 0.5, 
+              scale = "width", 
+              color = "white") +
+  
+  coord_flip() +
+  facet_wrap(~comparison_id, ncol = 1, strip.position = "left") +
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_y_log10() +
+  
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        strip.background = element_rect(fill = "white"),
+        strip.text.y = element_text(hjust = 1, face = "bold", angle = 180))
+ggsave(savepath("enrichment score overlap class violinplot.pdf"), width= 5, height = 10)
+
+plot_data <- 
+  gene_overlap_data %>% 
+  mutate(enrichment_score = case_when(type == "Overlap" ~ (spec_score_human + spec_score_pig) / 2,
+                                      type == "Human" ~ spec_score_human,
+                                      type == "Pig" ~ spec_score_pig)) %>%
+  group_by(comparison_id, type) %>% 
+  do({
+    g_data <- .
+    saved_data <<- g_data
+    
+    
+    summary(g_data$enrichment_score) %>% 
+      enframe("metric", "value") 
+  }) %>%
+  ungroup() %>%
+  mutate(comparison_id = factor(comparison_id, 
+                                levels = {filter(., type == "Overlap" & metric == "Median") %$%
+                                    comparison_id[order(value)]})) %>%
+  mutate(order = unclass(comparison_id) * case_when(metric == "1st Qu." ~ -1, 
+                                                    metric == "Median" ~ 0, 
+                                                    metric == "3rd Qu." ~ 1)) %>%
+  arrange(order) %>%
+  filter(metric %in% c("1st Qu.", "Median", "3rd Qu.")) 
+
+plot_data %>%
+  # filter(metric %in% c("Median")) %>%
+  ggplot(aes(comparison_id, value, fill = type, color = type)) + 
+  geom_polygon(data = . %>%
+                 filter(!metric %in% c("Median")),
+                 aes(group = paste(type)),
+               alpha = 0.1, 
+               color = NA) +
+  
+  geom_point(data = . %>%
+                 filter(metric %in% c("Median"))) +
+  geom_line(data = . %>%
+                 filter(metric %in% c("Median")),
+            aes(group = type)) +
+  
+  
+  scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_color_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+  scale_linetype_manual(values = c("1st Qu." = "dashed", "Median" = "solid", "3rd Qu." = "dashed")) +
+  scale_y_log10() +
+  
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.ticks = element_blank(), 
+        axis.title = element_blank(),
+        panel.background = element_blank(), 
+        panel.spacing = unit(0, "cm"), 
+        strip.background = element_rect(fill = "white"),
+        strip.text.y = element_text(hjust = 1, face = "bold", angle = 180))
+ggsave(savepath("enrichment score overlap class median lineplot.pdf"), width= 8, height = 5)
+
+```
+
+#Side stories
+
+##SLA genes
+
+```{r}
+
+pig_atlas_tissue %>% 
+  inner_join(SLA_genes) %>% 
+  left_join(tissue_mapping,
+            by = c("tissue_ID" = "tissue")) %>% 
+  select(gene_name, tissue_name, nx) %>%
+  spread(gene_name, nx) %>%
+  column_to_rownames("tissue_name") %>%
+  {log10(. + 1)} %>% 
+  # scale(center = T, scale = F) %>%
+  pheatmap(border_color = NA, 
+           color = heatmap_palette,
+           clustering_method = "ward.D2", 
+           cutree_rows = 5, 
+           cutree_cols = 3,
+           filename = savepath("SLA heatmap.pdf"),
+           width = 5, height = 10)
+
+pig_atlas_tissue %>% 
+  inner_join(SLA_genes) %>% 
+  left_join(tissue_mapping,
+            by = c("tissue_ID" = "tissue")) %>% 
+  filter(consensus_tissue_name %in% c("heart",
+                                      "liver",
+                                      "kidney",
+                                      "lung",
+                                      "cornea",
+                                      "skin")) %>%
+  select(gene_name, tissue_name, nx) %>%
+  spread(gene_name, nx) %>%
+  column_to_rownames("tissue_name") %>%
+  {log10(. + 1)} %>% 
+  # scale(center = T, scale = F) %>%
+  pheatmap(border_color = NA, 
+           color = heatmap_palette,
+           clustering_method = "ward.D2", 
+           cutree_rows = 2, 
+           cutree_cols = 3,
+           filename = savepath("SLA heatmap specific.pdf"),
+           width = 5, height = 4)
+```
+
+# Xenotransplantation knockout genes
+
+## Heatmaps
+
+```{r}
+
+xeno_ko_genes <- 
+  c("GGTA1" = "ENSSSCG00000005518", 
+    "CMAH" = "ENSSSCG00000001099", 
+    "B4GALNT2" = "ENSSSCG00000030269",
+    "B4GALNT2" = "ENSSSCG00000040942",
+    "VWF" = "ENSSSCG00000000712", 
+    "ULBP1" = "ENSSSCG00000026042",
+    "ULBP1" = "ENSSSCG00000035574") %>% 
+  enframe("gene_name", "enssscg_id") %>% 
+  mutate(name_id = paste(gene_name, enssscg_id))
+
+pig_atlas_tissue %>% 
+  inner_join(xeno_ko_genes) %>%
+  # filter(enssscg_id %in% c(xeno_ko_genes$enssscg_id, SLA_genes$enssscg_id)) %>%
+  left_join(tissue_mapping,
+            by = c("tissue_ID" = "tissue")) %>% 
+   filter(consensus_tissue_name %in% c("heart",
+                                      "liver",
+                                      "kidney",
+                                      "lung",
+                                      "cornea",
+                                      "skin")) %>%
+  select(name_id, tissue_name, nx) %>%
+  spread(name_id, nx) %>%
+  column_to_rownames("tissue_name") %>%
+  {log10(. + 1)} %>%
+  # scale(center = F, scale = T) %>%
+  pheatmap(border_color = NA, 
+           color = heatmap_palette,
+           clustering_method = "ward.D2", 
+           cutree_rows = 3, 
+           cutree_cols = 3,
+           filename = savepath("Xeno KO heatmap.pdf"),
+           width = 5, height = 5)
+
+```
+
+## Co-expression network
+
+```{r}
+
+pig_atlas_sample
+xeno_ko_prop_res <- 
+  pig_gene_propr_res %>%
+  {.[, xeno_ko_genes$enssscg_id]} %>% 
+  as_tibble(rownames = "enssscg_id1") %>% 
+  gather(enssscg_id2, prop, -1) %>%
+  left_join(gene_mapping,
+            by = c("enssscg_id1" = "enssscg_id")) %>%
+  left_join(xeno_ko_genes,
+            by = c("enssscg_id2" = "enssscg_id"),
+            suffix = c("1", "2")) %>%
+  select(-biotype) %>%
+  rename(gene_name1 = display_name, 
+         gene_name2 = gene_name, 
+         gene_id2 = name_id) %>%
+  mutate(gene_id1 = ifelse(gene_name1 == "NULL", enssscg_id1, paste(gene_name1, enssscg_id1))) %>%
+  select(enssscg_id1, enssscg_id2, gene_name1, gene_name2, gene_id2, gene_id1, prop)
+
+
+
+
+net_data <- 
+  xeno_ko_prop_res %>%
+  filter(abs(prop) > 0.65)
+
+
+####
+
+net_edges <- 
+  net_data %>%
+  select(gene_id1, gene_id2, prop)
+
+xeno_ko_prop_res %>% 
+  filter(enssscg_id1 %in% net_data$enssscg_id1) %>%
+  select(gene_id1, gene_id2, prop) %>%
+  spread(gene_id2, prop, fill = 0) %>% 
+  column_to_rownames("gene_id1") %>% 
+  pheatmap(clustering_method = "ward.D2", 
+           cutree_rows = 5,
+           border_color = NA,
+           filename = savepath("Xeno KO genes propr network heatmap.pdf"),
+           width = 6, height = 100)
+
+g <-
+  net_edges %>%
+  graph_from_data_frame(directed = FALSE) %>%
+  ggraph(layout = "kk") 
+
+
+
+edge_data <- get_edges()(g$data)
+node_data <- 
+  get_nodes()(g$data) %>% 
+  as_tibble()
+  
+
+g + 
+  geom_edge_arc(aes(color = prop,
+                    width = abs(prop),
+                    alpha = abs(prop)),
+                strength = 0, 
+                show.legend = F) + 
+    scale_edge_alpha_continuous(range = c(0.3, 1)) +
+    scale_edge_width_continuous(range = c(1, 3)) +
+  
+  geom_node_point(data = node_data, 
+                  stroke = 1,
+                  # size = 10,
+                  shape = 21,
+                  show.legend = F)+
+  # geom_node_text(data = node_data,
+  #                aes(label = name),
+  #                size = 4) +
+  scale_size_continuous(range = c(5, 10)) +
+  scale_edge_color_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  scale_fill_manual(values = c(tissue_colors_palette_full, gene_category_pal)) +
+  
+  theme_void()
+
+ggsave(savepath("Network pig enrichment whole group.pdf"), width = 16, height = 12, useDingbats = F)
+ggsave(savepath("Network pig enrichment whole group.png"), width = 16, height = 12)
+
+
+```
+
+## Whole genome network
+
+```{r}
+
+
+prop_filter <- 0.999
+
+pig_atlas_sample %>%
+  filter(enssscg_id %in% c("ENSSSCG00000003444", "ENSSSCG00000004183")) %>%
+  select(1, 2, ptpm) %>%
+  spread(enssscg_id, ptpm) %>% 
+  ggplot(aes(ENSSSCG00000003444, ENSSSCG00000004183)) +
+  geom_point()
+    
+
+
+net_data <- 
+  pig_gene_propr_res_05filtered %>% 
+  filter(abs(prop) > prop_filter)
+  
+prop_gene_graph <-
+  net_data %>%
+  graph_from_data_frame(directed = FALSE) 
+
+prop_gene_graph_plot <- 
+  prop_gene_graph %>%
+  ggraph(layout = "kk") +
+  geom_edge_arc(aes(color = sign(prop)),
+                strength = 0, 
+                show.legend = F) + 
+  scale_color_manual(values = c("-1" = "skyblue", "1" = "orangered"))
+
+ggsave(savepath("Global gene prop network.pdf"), plot = prop_gene_graph_plot, width = 10, height = 10)
+
+```
+

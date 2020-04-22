@@ -1,4 +1,6 @@
 sample_ID,tissue,individual,comment
+vein_a,vein,a,We are not sure right tissue has been collected based on clustering
+vein_b,vein,b,We are not sure right tissue has been collected based on clustering
 vein_c,vein,c,"Wrong tissue collected, nerve was collected instead of vein as confirmed by histology"
 vein_d,vein,d,Clusters far from other vein samples
 skiB_a,skiB,a,Clusters far from other skin samples
@@ -9,6 +11,7 @@ pan_b,pan,b,A large proportion of genes has TPM = 0
 pan_c,pan,c,A large proportion of genes has TPM = 0
 pan_d,pan,d,A large proportion of genes has TPM = 0
 carJ_b,carJ,b,A large proportion of genes has TPM = 0 (and it therefore clusters with some pancreas samples)
+adiB_a,adiB,a,Expresses high pancreas markers - suspected contamination
 skiL_c,skiL,c,Histology showed the sample included a lot of hair folicles
 smoU_a,smoU,a,"Histology showed that the sample was mostly cervix, and clustering confirms this"
 smoU_b,smoU,b,"Histology showed that the sample was mostly cervix, and clustering confirms this"

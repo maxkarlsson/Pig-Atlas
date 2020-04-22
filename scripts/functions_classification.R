@@ -157,6 +157,136 @@ calc_gene_correlations <-
       set_colnames(c(var1, var2, colnames(.)[-c(1, 2)]))
   }
 
+calc_pairwise_correlations <- 
+  function(nonlogged_data, var1, var2, val1, val2, 
+           cor_method = c("spearman", "pearson", "concordance", "proportionality"), 
+           p_adjust_method = "BH", alternative = "two.sided") {
+    
+    data_ <- 
+      nonlogged_data %>%
+      rename(var1 = var1, 
+             var2 = var2, 
+             val1 = val1, 
+             val2 = val2) %>%
+      mutate(log_val1 = log10(val1 + 1),
+             log_val2 = log10(val2 + 1))
+    
+    cor_res <- 
+      tibble(var1 = character(), 
+             var2 = character(), 
+             pval = double(), 
+             cor = double(), 
+             lo_confint = double(),
+             hi_confint = double(), 
+             metric = character(),
+             padj = double(), 
+             significant = logical(), 
+             log10P = double()) %>%
+      set_colnames(c(var1, var2, colnames(.)[-c(1, 2)]))
+      
+    cor_res <- 
+      data_ %>%
+      group_by(var1, var2) %>% 
+      do({
+        g_data <- .
+        
+        res <- 
+          tibble(pval = double(),
+                 cor = double(), 
+                 lo_confint = double(),
+                 hi_confint = double())
+        
+        if("pearson" %in% cor_method) {
+          res <- 
+            g_data %$%
+            cor.test(log_val1, log_val2, method = "pearson", alternative = alternative) %$%
+            tibble(pval = p.value, 
+                   cor = estimate, 
+                   lo_confint = conf.int[1], 
+                   hi_confint = conf.int[2], 
+                   metric = "pearson") %>%
+            bind_rows(res)
+        } 
+        
+        if("spearman" %in% cor_method) {
+          res <- 
+            g_data %$%
+            cor.test(val1, val2, method = "spearman", alternative = alternative) %$%
+            tibble(pval = p.value, 
+                   cor = estimate, 
+                   lo_confint = NA, 
+                   hi_confint = NA,
+                   metric = "spearman") %>%
+            bind_rows(res)
+        } 
+      }) %>% 
+      group_by(metric) %>%
+      mutate(padj = p.adjust(pval, method = p_adjust_method), 
+             significant = padj <= 0.05, 
+             log10P = -log10(padj)) %>% 
+      ungroup() %>%
+      arrange(metric, padj) %>% 
+      set_colnames(c(var1, var2, colnames(.)[-c(1, 2)])) %>% 
+      bind_rows(cor_res)
+    
+    
+    if("concordance" %in% cor_method) {
+      
+      cor_res <- 
+        data_ %>%
+        group_by(var1, var2) %>%
+        summarise(cov = cov(log_val1, log_val2),
+                  vari1 = var(log_val1),
+                  vari2 = var(log_val2), 
+                  rho = (2 * cov) / 
+                    (vari1 + vari2)) %>%
+        ungroup() %$%
+        tibble(var1, 
+               var2, 
+               pval = NA, 
+               cor = rho, 
+               lo_confint = NA,
+               hi_confint = NA, 
+               metric = "concordance",
+               padj = NA, 
+               significant = NA, 
+               log10P = NA) %>%
+        set_colnames(c(var1, var2, colnames(.)[-c(1, 2)])) %>% 
+        bind_rows(cor_res)
+        
+    } 
+    
+    if("proportionality" %in% cor_method) {
+      
+      cor_res <- 
+        data_ %>%
+        group_by(var1, var2) %>%
+        summarise(cov = cov(log_val1, log_val2),
+                  vari1 = var(log_val1),
+                  vari2 = var(log_val2), 
+                  rho_x = var(log_val1 - log_val2)/vari1,
+                  rho_y = var(log_val2 - log_val1)/vari2) %>%
+        ungroup() %$%
+        tibble(var1 = c(var1, var1), 
+               var2 = c(var2, var2), 
+               pval = NA, 
+               cor = c(rho_x, rho_y), 
+               lo_confint = NA,
+               hi_confint = NA, 
+               metric = rep(c("proportionality_x", "proportionality_y"), each = length(rho_x)),
+               padj = NA, 
+               significant = NA, 
+               log10P = NA) %>%
+        set_colnames(c(var1, var2, colnames(.)[-c(1, 2)])) %>% 
+        bind_rows(cor_res)
+      
+    } 
+    
+    
+    cor_res
+  }
+
+
 calc_gene_distance <- 
   function(data, var1, var2, val1, val2) {
     

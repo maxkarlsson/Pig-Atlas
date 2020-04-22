@@ -192,7 +192,19 @@ elevation_overlap_levels <-
   c("Pig", "Both", "Human")
 
 elevation_overlap_pal <- 
-  set_names(rev(pals::ocean.haline(9)[c(3, 4, 6)]), elevation_overlap_levels)
+  c(set_names(rev(pals::ocean.haline(9)[c(3, 4, 6)]), elevation_overlap_levels),
+    set_names(rev(pals::ocean.haline(9)[c(3, 4, 6)]), c("Elevated in Pig", "Elevated in both", "Elevated in Human")))
+
+elevation_overlap_pal2 <-
+  c("Human" = "#DB1F48", 
+    "Overlap" = "#004369", 
+    "Pig" = "#01949A",
+    "Elevated in Human" = "#DB1F48", 
+    "Elevated in both" = "#004369", 
+    "Elevated in Pig" = "#01949A",
+    "Enriched in Human" = "#DB1F48", 
+    "Enriched in both" = "#004369", 
+    "Enriched in Pig" = "#01949A")
 
 # protein_type_pal <- 
 #   c("secreted" = '#911D51',

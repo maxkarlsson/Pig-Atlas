@@ -556,7 +556,9 @@ map_colors_to_edge <- function(edge_data, color_mapping, label_col, color_col, m
 }
 
 circular_dendrogram_retinastyle <-
-  function(clust, color_mapping, label_col, color_col, mean_color = F) {
+  function(clust, color_mapping, label_col, color_col, mean_color = F, 
+           scale_expansion = c(0.25, 0.25), text_size = 3, width_range = c(1.5, 6), 
+           arc_strength = 0.8) {
     require(ggraph)
     require(igraph)
     require(viridis)
@@ -578,11 +580,13 @@ circular_dendrogram_retinastyle <-
 
 
     g +
-      scale_edge_width(range = c(1.5, 6))+
+      scale_edge_width(range = width_range)+
       geom_edge_diagonal(aes(edge_color = as.character(edge_data$edge.id),
                              edge_width = 1 - sqrt(xend^2 + yend^2)),
-                         strength = 0.8,
+                         strength = arc_strength,
                          show.legend = F) +
+      
+      
       scale_edge_color_manual(values = edge_data_colors %$%
                                 set_names(c(color, "gray80"), c(edge.id, "")))  +
       g$data %>%
@@ -596,16 +600,117 @@ circular_dendrogram_retinastyle <-
                 {geom_node_text(data = .,
                                 aes(label = label),
                                 angle = .$degree,
-                                hjust = ifelse(.$x < 0, 1, 0),
+                                hjust = ifelse(.$x < 0, 
+                                               1, 
+                                               0),
                                 vjust = 0.5,
-                                size = 3)}  +
-      scale_x_continuous(expand = expand_scale(c(0.25, 0.25))) +
-      scale_y_continuous(expand = expand_scale(c(0.25, 0.25))) +
+                                size = text_size)}  +
+      scale_x_continuous(expand = expand_scale(scale_expansion)) +
+      scale_y_continuous(expand = expand_scale(scale_expansion)) +
 
       coord_fixed() +
       theme_void()
   }
 
+
+circular_dendrogram_retinastyle_2 <-
+  function(clust, color_mapping, label_col, color_col, 
+           scale_expansion = c(0.25, 0.25), text_size = 3, width_range = c(1.5, 6), 
+           arc_strength = 0.8, default_color = "gray80") {
+    require(ggraph)
+    require(igraph)
+    require(viridis)
+    require(tidyverse)
+    require(magrittr)
+    
+    dendrogram <-
+      clust %>%
+      as.dendrogram()
+    
+    
+    
+    g <-
+      ggraph(dendrogram, layout = 'dendrogram', circular = T)
+    
+    edge_data <- 
+      get_edges()(g$data) %>%
+      as_tibble() %>%
+      left_join(color_mapping %>%
+                  select(label = label_col,
+                         color = color_col),
+                by = c("node2.label" = "label")) %>%
+      mutate(radius = xend^2 + yend^2,
+             edge.id = as.character(edge.id)) %>%
+      arrange(-radius) %>%
+      mutate(edge_id = as.character(row_number()),
+             rank_radius = unclass(factor(-radius)),
+             x_m = round(x, 10),
+             y_m = round(y, 10),
+             xend_m = round(xend, 10),
+             yend_m = round(yend, 10)) 
+    
+    
+    edge_id_colors <- 
+      edge_data %>% 
+      filter(!is.na(color)) %$%
+      set_names(color, edge_id)
+    
+    
+    
+    for(rank_rad in 2:max(edge_data$rank_radius)) {
+      edge_id_colors_new <- 
+        left_join(edge_data %>%
+                    select(edge_id, radius, xend_m, yend_m, rank_radius) %>%
+                    filter(rank_radius == rank_rad),
+                  edge_data %>%
+                    select(edge_id, radius, x_m, y_m, rank_radius) %>%
+                    filter(rank_radius < rank_rad),
+                  by = c("xend_m" = "x_m", "yend_m" = "y_m")) %>%
+        left_join(enframe(edge_id_colors),
+                  by = c("edge_id.y" = "name")) %>%
+        group_by(edge_id.x) %>% 
+        summarise(color = ifelse(n_distinct(value) == 1 & any(value != default_color), 
+                                 unique(value),
+                                 default_color)) %$%
+        set_names(color, edge_id.x)
+      edge_id_colors <- 
+        c(edge_id_colors, edge_id_colors_new)
+    }
+    
+    
+    
+    g +
+      scale_edge_width(range = width_range)+
+      geom_edge_diagonal(data = edge_data,
+                         aes(edge_color = as.character(edge_id),
+                             edge_width = 1 - sqrt(xend^2 + yend^2)),
+                         strength = arc_strength,
+                         show.legend = F) +
+      
+      
+      scale_edge_color_manual(values = edge_id_colors)  +
+      g$data %>%
+      filter(label != "") %>%
+      mutate(degree = case_when(x >= 0 ~ asin(y) * 180 / pi,
+                                x < 0 ~ 360 - asin(y) * 180 / pi)) %>%
+      left_join(color_mapping %>%
+                  select(label = label_col,
+                         color = color_col),
+                by = "label") %>%
+                {geom_node_text(data = .,
+                                aes(label = label),
+                                angle = .$degree,
+                                hjust = ifelse(.$x < 0, 
+                                               1, 
+                                               0),
+                                vjust = 0.5,
+                                size = text_size)}  +
+      scale_x_continuous(expand = expand_scale(scale_expansion)) +
+      scale_y_continuous(expand = expand_scale(scale_expansion)) +
+      
+      coord_fixed() +
+      theme_void()
+  }
 
 pairwise_alluvial_plot <- 
   function(data, var1, var2, cat1, cat2, cat_levels, cat_names, pal) {
@@ -894,24 +999,230 @@ multi_alluvial_plot <-
     alluv_1
   }
 
+## comparison of classification
+
+compare_class_bar_venn <- 
+  function(data, title_label) {
+    data %>%
+      mutate(comparison_id = factor(str_to_sentence(comparison_id)),
+             type = factor(type)) %>%
+      group_by(comparison_id, type, .drop = F) %>%
+      summarise(n = n()) %>%
+      
+      ungroup() %>%
+      
+      mutate(comparison_id = factor(comparison_id, 
+                                    levels = {
+                                      filter(., type == "Overlap") %$%
+                                        comparison_id[order(n)]
+                                    })) %>%
+      ggplot() + 
+      geom_col(mapping = aes(comparison_id, n,fill = type)) + 
+      
+      geom_text(data = . %>%
+                  filter(type == "Pig"),
+                aes(x = comparison_id, y = 0,
+                    label = n),
+                hjust = 1) +
+      geom_text(data = . %>%
+                  group_by(comparison_id, .drop = F) %>%
+                  summarise(y = n[which(type == "Overlap")] / 2 +
+                              n[which(type == "Pig")],
+                            label = n[which(type == "Overlap")]),
+                aes(x = comparison_id, y = y,
+                    label = label),
+                hjust = 0.5,
+                color = "white") +
+      geom_text(data = . %>%
+                  group_by(comparison_id, .drop = F) %>%
+                  summarise(y = sum(n),
+                            label = n[which(type == "Human")]),
+                aes(x = comparison_id, y = y,
+                    label = label),
+                hjust = 0) +
+      
+      coord_flip() + 
+      
+      scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+      scale_y_continuous(expand = expand_scale(0.13)) +
+      
+      theme(axis.text.y = element_text(face = "bold"), 
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank(), 
+            axis.title = element_blank(),
+            panel.background = element_blank(),
+            
+            legend.position = c(0.5, 0.5)) + 
+      
+      ggtitle(title_label)
+  }
+
+compare_class_bar_venn_zoom <- 
+  function(data, title_label, ylim) {
+    plot_data <- 
+      data %>%
+      mutate(comparison_id = factor(comparison_id),
+             type = factor(type)) %>%
+      group_by(comparison_id, type, .drop = F) %>%
+      summarise(n = n()) %>%
+      
+      ungroup() %>%
+      
+      mutate(comparison_id = factor(comparison_id, 
+                                    levels = {
+                                      filter(., type == "Overlap") %$%
+                                        rev(comparison_id[order(n)])
+                                    })) 
+      
+    plot_data %>%
+      ggplot() + 
+      geom_col(mapping = aes(comparison_id, n,fill = type)) + 
+      
+      geom_text(data = . %>%
+                  filter(type == "Pig"),
+                aes(x = comparison_id, y = 0,
+                    label = n),
+                hjust = 1, 
+                vjust = 0.4,
+                angle = 90) +
+      geom_text(data = . %>%
+                  group_by(comparison_id, .drop = F) %>%
+                  summarise(y = n[which(type == "Overlap")] / 2 +
+                              n[which(type == "Pig")],
+                            label = n[which(type == "Overlap")]),
+                aes(x = comparison_id, y = y,
+                    label = label),
+                hjust = 0.5,
+                vjust = 0.4,
+                color = "white",
+                angle = 90) +
+      geom_text(data = . %>%
+                  group_by(comparison_id, .drop = F) %>%
+                  summarise(y = sum(n),
+                            label = n[which(type == "Human")]),
+                aes(x = comparison_id, y = y,
+                    label = label),
+                hjust = 0,
+                vjust = 0.4,
+                angle = 90) +
+      
+      
+      
+      scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+      scale_y_continuous(expand = expand_scale(0.13)) +
+      
+      theme(axis.text.x = element_text(face = "bold", angle = 90, hjust = 1, vjust = 0.4), 
+            # axis.text.y = element_blank(),
+            # axis.ticks.y = element_blank(), 
+            axis.title = element_blank(),
+            panel.background = element_blank(),
+            
+            legend.position = c(0.5, 0.5)) + 
+      
+      ggtitle(title_label) + 
+      
+      facet_zoom(ylim = ylim, zoom.size = 1 , split = T)
+  }
+  
+compare_class_enrichment_score_lineplot <- 
+  function(data, title_label, man_order = F, plot_order = NA) {
+    
+    plot_data_ <- 
+      data %>% 
+      mutate(enrichment_score = case_when(type == "Overlap" ~ (spec_score_human + spec_score_pig) / 2,
+                                          type == "Human" ~ spec_score_human,
+                                          type == "Pig" ~ spec_score_pig)) %>%
+      group_by(comparison_id, type) %>% 
+      do({
+        g_data <- .
+        saved_data <<- g_data
+        
+        
+        summary(g_data$enrichment_score) %>% 
+          enframe("metric", "value") 
+      }) %>%
+      ungroup() 
+    
+    if(man_order) {
+      plot_data_ <-
+        plot_data_ %>%
+        mutate(comparison_id = factor(comparison_id, 
+                                      levels = plot_order))
+      
+    } else {
+      plot_data_ <-
+        plot_data_ %>%
+        mutate(comparison_id = factor(comparison_id, 
+                                      levels = {filter(., type == "Overlap" & metric == "Median") %$%
+                                          comparison_id[order(value)]}))
+    }
+     plot_data <-
+       plot_data_ %>%
+       mutate(order = unclass(comparison_id) * case_when(metric == "1st Qu." ~ -1, 
+                                                         metric == "Median" ~ 0, 
+                                                         metric == "3rd Qu." ~ 1)) %>%
+       arrange(order) %>%
+       filter(metric %in% c("1st Qu.", "Median", "3rd Qu.")) 
+    
+    plot_data %>%
+      # filter(metric %in% c("Median")) %>%
+      ggplot(aes(comparison_id, value, fill = type, color = type)) + 
+      geom_polygon(data = . %>%
+                     filter(!metric %in% c("Median")),
+                   aes(group = paste(type)),
+                   alpha = 0.2, 
+                   color = NA) +
+      
+      geom_point(data = . %>%
+                   filter(metric %in% c("Median"))) +
+      geom_line(data = . %>%
+                  filter(metric %in% c("Median")),
+                aes(group = type)) +
+      
+      
+      scale_fill_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+      scale_color_manual(values = c("Human" = "#DB1F48", "Overlap" = "#004369", "Pig" = "#01949A")) +
+      scale_linetype_manual(values = c("1st Qu." = "dashed", "Median" = "solid", "3rd Qu." = "dashed")) +
+      scale_y_log10() +
+      
+      theme(axis.text.x = element_text(angle = 60, hjust = 1),
+            axis.ticks = element_blank(), 
+            axis.title = element_blank(),
+            panel.background = element_blank(), 
+            panel.spacing = unit(0, "cm"), 
+            strip.background = element_rect(fill = "white"),
+            strip.text.y = element_text(hjust = 1, face = "bold", angle = 180)) + 
+      ggtitle(title_label)
+    
+  }
 # ----- Misc plots -----
 
 pie_plot <- 
-  function(plot_data, class_col, y_col, pal, dodge = 0.1){
+  function(plot_data, class_col, y_col, pal, dodge = 0.1, percent = F, 
+           suffix = "", prefix = ""){
     plot_data_ <- 
       plot_data %>%
       rename(class = class_col, 
-             y = y_col)
+             y = y_col) %>%
+      mutate(label = paste0(class, "\n", prefix, y, suffix))
     
-    if(!is.factor(plot_data$term)) {
+    if(!is.factor(plot_data_$class)) {
       plot_data_ <- 
         plot_data_ %>%
         mutate(class = factor(class))
     }
+    
+    if(percent) {
+      plot_data_ <- 
+        plot_data_ %>%
+        mutate(label = paste0(class, "\n", round(y * 100, 1), " %"))
+    }
+    
     plot_data_ %>% 
       arrange(match(class, rev(levels(class)))) %>% 
       mutate(y_stack = cumsum(y) - y/2) %>% 
-      {ggplot(., aes(1, y, fill = class, group = class, label = paste0(class, "\n", round(y * 100, 1), " %"))) +
+      {ggplot(., aes(1, y, fill = class, group = class, 
+                     label = label)) +
           geom_col(show.legend = F, 
                    color = "white", 
                    width = 1) + 
@@ -962,6 +1273,148 @@ pie_plot_facet <-
           scale_x_continuous(expand = expand_scale(c(0,0.8)))}
   }
 
+partial_donut_plot <- 
+  function(plot_data, class_col, y_col, pal, dodge = 0.1, percent = F, 
+           suffix = "", prefix = "", 
+           donut_expansion = c(0.5, 0.5),
+           donut_radius = c(0.5, 0.8)){
+    plot_data_ <- 
+      plot_data %>%
+      rename(class = class_col, 
+             y = y_col) %>%
+      mutate(label = paste0(class, "\n", prefix, y, suffix))
+    
+    if(!is.factor(plot_data_$class)) {
+      plot_data_ <- 
+        plot_data_ %>%
+        mutate(class = factor(class))
+    }
+    
+    if(percent) {
+      plot_data_ <- 
+        plot_data_ %>%
+        mutate(label = paste0(class, "\n", round(y * 100, 1), " %"))
+    }
+    
+    plot_data_ %>% 
+      arrange(match(class, rev(levels(class)))) %>% 
+      mutate(y_stack = cumsum(y) - y/2) %>% 
+      {ggplot(., aes(1, y, fill = class, group = class, 
+                     label = label)) +
+          geom_col(show.legend = F, 
+                   color = "white", 
+                   width = 1) + 
+          geom_segment(aes(x = 1.5 + dodge, xend = 1.5, 
+                           y = y_stack, yend = y_stack), size = 0.5) +
+          geom_text_repel(aes(x = 1.5 + dodge, y = y_stack), 
+                          color = "black", nudge_x = dodge, 
+                          segment.size = 0.5) +
+          
+          scale_fill_manual(values = pal) +
+          scale_x_continuous(expand = expand_scale(donut_radius)) + 
+          scale_y_continuous(expand = expand_scale(donut_expansion )) + 
+          
+          coord_polar("y") +
+          
+          theme_void() }
+  }
+
+donut_plot <- 
+  function(plot_data, class_col, group_col, level_col, y_col, pal, dodge = 0.1, 
+           suffix = "", prefix = "", 
+           widths = c(1), 
+           inner_label = c(T), 
+           outer_label = c(F), 
+           curved_label = c(F), 
+           text_color = c("black"), 
+           label_format = c("percent", "p", 
+                            "label", "l", 
+                            "number", "n")){
+    plot_data_ <- 
+      plot_data %>%
+      rename(group = group_col, 
+             class = class_col, 
+             y = y_col, 
+             level = level_col) 
+    
+    plot_data_ <- 
+      plot_data_ %>%
+      group_by(level) %>%
+      mutate(n = y, 
+             p = paste0(round(100 * y / sum(y), 1), " %"),
+             l = class, 
+             
+             label_structure = label_format[level]) %>%
+      ungroup() %>%
+      mutate(label = sapply(row_number(), 
+                            function(i) {
+                              lbl_str <- .$label_structure[i]
+                              p_ <- .$p[i]
+                              n_ <- .$n[i]
+                              l_ <- .$l[i]
+                              
+                              strsplit(lbl_str, "") %>% 
+                                unlist() %>% 
+                                paste0(., "_", collapse = ",") %>% 
+                                {eval(parse(text = paste("paste(", ., ", sep = '\n')")))}
+                            }))
+        
+    
+    
+    plot_data_ %>% 
+      group_by(level) %>%
+      arrange(match(class, rev(levels(class)))) %>% 
+      mutate(y_cum = cumsum(y),
+             y_stack = y_cum - y/2, 
+             degree_ = y_stack / max(y_cum) * -360, 
+             degree = ifelse((degree_ > -180 & degree_ <= -90), degree_ + 180, degree_)) %>%
+            
+      ungroup() %>% 
+      mutate(label_x = level + 0.5 - (1 - widths[level]) / 2, 
+             inner_labl = ifelse(inner_label[level], 
+                                  label, NA),
+             outer_labl = ifelse(outer_label[level], 
+                                  label, NA),
+             curved_labl = ifelse(curved_label[level], 
+                                  label, NA)) %>%
+      mutate(xend = ifelse(outer_label[level], 
+                           label_x, label_x + dodge)) %>%  
+    {ggplot(., aes(level, y, 
+                   fill = class, group = class)) +
+        geom_col(show.legend = F, 
+                 color = "white", 
+                 width = widths[.$level]) + 
+        
+        # geom_label(aes(y = y_stack, color = degree_, label = round(degree_))) +
+        
+        
+        
+        geom_segment(aes(x = label_x + dodge, 
+                         xend = xend, 
+                         y = y_stack, yend = y_stack), size = 0.5) +
+        
+        #Outer
+        geom_text_repel(aes(x = label_x + dodge, y = y_stack, 
+                            label = outer_labl),
+                        color = text_color[.$level], nudge_x = dodge,
+                        segment.size = 0.5) +
+        
+        #Inner
+        geom_text(aes(x = level + dodge, y = y_stack, 
+                            label = inner_labl),
+                        color = text_color[.$level], nudge_x = dodge) +
+        
+        #Curved
+        geom_text(aes(x = level + widths[level] / 2, y = y_stack, 
+                      label = curved_labl),
+                  color = text_color[.$level], nudge_x = dodge, 
+                  angle = .$degree) +
+        
+        scale_fill_manual(values = pal) +
+        scale_x_continuous(expand = expand_scale(c(0,0.8))) +
+        coord_polar("y") +
+        theme_void()}
+  }
 
 scatter_cor_plot <- 
   function(plot_data, 
@@ -1054,14 +1507,14 @@ evolutionary_tree_plot <- function(data,
 }
 
 pca_calc <- function(data, npcs) {
-
+  
   pca_res <-
     data %>%
-    pca(nPcs = npcs)
+    pcaMethods::pca(nPcs = npcs)
 
   pca_stats <-
     tibble(PC = 1:npcs,
-           R2cum = R2cum(pca_res))
+           R2cum = pcaMethods::R2cum(pca_res))
 
   informative_pcs <- pca_stats$PC[which(pca_stats$R2cum > 0.95)[1]]
 

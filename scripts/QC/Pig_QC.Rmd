@@ -3665,7 +3665,9 @@ The following section describes which samples were removed from the data set. Su
 
 ```{r removed_samples, echo = F}
 removed_samples <- 
-  c("vein_c" = "Wrong tissue collected, nerve was collected instead of vein as confirmed by histology",
+  c("vein_a" = "We are not sure right tissue has been collected based on clustering",
+    "vein_b" = "We are not sure right tissue has been collected based on clustering",
+    "vein_c" = "Wrong tissue collected, nerve was collected instead of vein as confirmed by histology",
     "vein_d" = "Clusters far from other vein samples",
     "skiB_a" = "Clusters far from other skin samples",
     "skiB_b" = "Clusters far from other skin samples",
@@ -3675,6 +3677,7 @@ removed_samples <-
     "pan_c" = "A large proportion of genes has TPM = 0",
     "pan_d" = "A large proportion of genes has TPM = 0",
     "carJ_b" = "A large proportion of genes has TPM = 0 (and it therefore clusters with some pancreas samples)",
+    "adiB_a" = "Expresses high pancreas markers - suspected contamination",
     "skiL_c" = "Histology showed the sample included a lot of hair folicles",
     "smoU_a" = "Histology showed that the sample was mostly cervix, and clustering confirms this",
     "smoU_b" = "Histology showed that the sample was mostly cervix, and clustering confirms this",
@@ -3696,6 +3699,11 @@ pig_data %>%
   filter(!sample_ID %in% removed_samples$sample_ID) %>%
   select(1:4, 9) %>%
   write_delim("pig_filtered_sample_data.tab", delim = "\t")
+
+pig_data %>% 
+  unite(tissue_ID, individual, col = "sample_ID", sep = "_", remove = F) %>%
+  select(1:4, 9) %>%
+  write_delim("pig_unfiltered_sample_data.tab", delim = "\t")
 ```
 
 The following plots show the clustering after problematic samples have been excluded.

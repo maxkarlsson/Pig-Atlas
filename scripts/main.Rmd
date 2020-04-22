@@ -558,7 +558,6 @@ if(file.exists("data/processed/pig_gene_spearman_res.Rdata")) {
   
   pig_gene_spearman_res <- 
     gene_combinations %>%
-    head(n_gs) %>%
     group_by(enssscg_id1, enssscg_id2) %>%
     partition(cluster) %>%
     

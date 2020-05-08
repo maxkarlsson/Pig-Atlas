@@ -304,6 +304,20 @@ pig_gene_classification %>%
          specificity_human = spec_category,
          specificity_human = dist_category,
          enhanced_tissues_human = enriched_tissues) %>% 
+  write_csv(savepath("Pig class ortholog table.csv"))
+
+pig_gene_classification %>% 
+  left_join(gene_orthologs) %>% 
+  left_join(human_gene_class %>% 
+              select(1:4),
+            by = "ensg_id") %>% 
+  left_join(human_gene_mapping) %>% 
+  select(enssscg_id, gene_name, 2, 3, 4, 5, 6) %>% 
+  distinct() %>%
+  group_by(enssscg_id, specificity_category, distribution_category, ts_score, enhanced_score, enhanced_tissues) %>%
+  summarise(gene_name = paste(sort(gene_name), collapse = ";")) %>%
+  ungroup() %>%
+  select(enssscg_id, gene_name, everything()) %>%
   write_csv(savepath("Pig class table.csv"))
 
 ```
@@ -472,32 +486,35 @@ basic_gene_stats %>%
 
 ```{r}
 
-if(file.exists("data/processed/pig_gene_propr.Rdata")) {
-  load("data/processed/pig_gene_propr_res.Rdata")
-  
-} else {
-  pig_gene_propr <- 
-    pig_atlas_sample %>%
-    select(1, 2, ptpm) %>% 
-    spread(enssscg_id, ptpm) %>%
-    column_to_rownames("sample_ID") %>% 
-    {. + 1} %>%
-    propr()
-  
-  pig_gene_propr_res <- 
-    pig_gene_propr@matrix
-  save(pig_gene_propr,
-       file = "data/processed/pig_gene_propr.Rdata")
-  save(pig_gene_propr_res,
-       file = "data/processed/pig_gene_propr_res.Rdata")
-  rm(pig_gene_propr)
-    
-} 
+
 
 if(file.exists("data/processed/pig_gene_propr_filtered.Rdata")) {
   load("data/processed/pig_gene_propr_filtered.Rdata")
   
 } else {
+  
+  if(file.exists("data/processed/pig_gene_propr.Rdata")) {
+    load("data/processed/pig_gene_propr_res.Rdata")
+    
+  } else {
+    pig_gene_propr <- 
+      pig_atlas_sample %>%
+      select(1, 2, ptpm) %>% 
+      spread(enssscg_id, ptpm) %>%
+      column_to_rownames("sample_ID") %>% 
+      {. + 1} %>%
+      propr()
+    
+    pig_gene_propr_res <- 
+      pig_gene_propr@matrix
+    save(pig_gene_propr,
+         file = "data/processed/pig_gene_propr.Rdata")
+    save(pig_gene_propr_res,
+         file = "data/processed/pig_gene_propr_res.Rdata")
+    rm(pig_gene_propr)
+    
+  } 
+  
   pig_gene_propr_res_05filtered <- 
     pig_gene_propr_res %>% 
     {temp <- .; temp[!upper.tri(temp)] <- NA; temp} %>%
@@ -567,13 +584,65 @@ if(file.exists("data/processed/pig_gene_spearman_res.Rdata")) {
                method = "spearman") %$%
         tibble(cor = estimate,
                p_val = p.value)
-    })
+    }) %>%
+    collect()
   save(pig_gene_spearman_res,
        file = "data/processed/pig_gene_spearman_res.Rdata")
     
 } 
 
 ```
+
+###Comparison spearman propr
+
+```{r}
+
+if(file.exists("data/processed/pig_gene_spearman_propr.Rdata")) {
+  load("data/processed/pig_gene_spearman_propr.Rdata")
+  
+} else {
+  temp_table_1 <-
+    pig_gene_propr_res_05filtered %>% 
+    filter(paste(enssscg_id1, enssscg_id2) %in% 
+             paste(pig_gene_spearman_res$enssscg_id1, pig_gene_spearman_res$enssscg_id2)) %>%
+    arrange(enssscg_id1, enssscg_id2)
+  
+  temp_table_2 <- 
+    pig_gene_spearman_res %>%
+    ungroup() %>%
+    arrange(enssscg_id1, enssscg_id2)
+  
+  i_s <- 
+    sample(1:nrow(temp_table_2), 10000)
+  
+  
+  all(temp_table_1$enssscg_id1[i_s] == temp_table_2$enssscg_id1[i_s] )
+  all(temp_table_1$enssscg_id2[i_s] == temp_table_2$enssscg_id2[i_s] )
+  
+  pig_gene_spearman_propr <-
+    temp_table_1 %>%
+    mutate(cor = temp_table_2$cor,
+           cor_p = temp_table_2$p_val)
+  
+  rm(temp_table_1, temp_table_2)
+  save(pig_gene_spearman_propr,
+       file = "data/processed/pig_gene_spearman_propr.Rdata")
+  
+} 
+
+
+# g <- 
+#   temp_table_2 %>% 
+#   
+#   left_join(,
+#           ) %>%
+#   ggplot(aes(prop, cor)) +
+#   geom_hex(aes(fill = stat(log10(count))),
+#            bins = 50) +
+#   scale_fill_viridis()
+
+```
+
 
 ##Classification
 
@@ -697,6 +766,390 @@ human_pig_gene_class_comparison <-
                                           abs(spec_cat_diff) >= 3 ~ "major difference")) %>% 
   ungroup()
 ```
+
+##Intraconsensus classification
+
+### Generate data
+```{r intra_consensus, echo=FALSE, warning=FALSE}
+
+
+
+
+
+anova_data <- 
+  pig_atlas_sample_norm %>% 
+  left_join(tissue_mapping,
+            by = c("tissue_ID" = "tissue")) %>% 
+  mutate(sex = case_when(individual %in% c("a", "b") ~ "female",
+                         individual %in% c("c", "d") ~ "male")) %>%
+  left_join(intra_consensus_analysis_list,
+            by = c("tissue_name" = "tissues")) %>%
+  filter(!is.na(organ))
+  
+if(file.exists("data/processed/pig_intraconsensus_anova.Rdata")) {
+  load("data/processed/pig_intraconsensus_anova.Rdata")
+} else {
+  intraconsens_anova_res <- 
+    anova_data %>% 
+    
+    group_by(enssscg_id, organ) %>% 
+    mutate(sd_ = sd(tmm),
+           max_ = max(tmm),
+           range_ = max(tmm) / min(tmm[which(tmm > 0)])) %>%
+    filter(sd_ > 0 & max_ > 1 & range_ >= 4) %>%
+    select(-sd_) %>% 
+    do({
+      g_data <- .
+      saved_data <<- g_data
+      
+      model <- aov(log2(tmm + 1) ~ tissue_name,
+                   data = g_data)
+      
+      
+      
+      
+      aov_res <- 
+        model %>%
+        tidy() %>%
+        left_join(omega_sq(model) %>% 
+                    enframe("term", "sqrt_omega") %>%
+                    mutate(term = trimws(term)), 
+                  by = "term")
+      
+      
+      tukey_res <- 
+        TukeyHSD(model) %>%
+        map(.f = function(x) as_tibble(x, rownames = "Comparison")) %>%
+        bind_rows(.id = "term") %>%
+        separate(Comparison, into = c("tissue1", "tissue2"), sep = "-") %>% 
+        left_join(g_data %>%
+                    select(tissue_name, individual, tmm), 
+                  by = c("tissue1" = "tissue_name")) %>%
+        left_join(g_data %>%
+                    select(tissue_name, tmm, individual), 
+                  by = c("tissue2" = "tissue_name",
+                         "individual"),
+                  suffix = c("1", "2")) %>%
+        
+        group_by(term, tissue1, tissue2, diff, lwr, upr, `p adj`) %>%
+        summarise(mean_tmm1 = mean(tmm1, na.rm = T),
+                  mean_tmm2 = mean(tmm2, na.rm = T),
+                  ratio = max(mean_tmm1, 1) / max(mean_tmm2, 1)) %>% 
+        ungroup()
+      
+      
+      aov_res %>% 
+        left_join(tukey_res,
+                  by = "term") %>% 
+        mutate(levene_p = lawstat::levene.test(log2(g_data$tmm + 1), 
+                                               g_data$tissue_name)$p.value)
+    }) %>%
+    select(organ, enssscg_id, df, sumsq, meansq, sqrt_omega, statistic,
+           aov_p = p.value, 
+           tissue1, tissue2, 
+           tukey_p = `p adj`,
+           everything()) %>%
+    group_by(term, organ) %>%
+    mutate(adj_aov_p = p.adjust(aov_p, method = "BH")) %>%
+    ungroup() %>%
+    mutate(sign_aov = adj_aov_p < 0.05,
+           sign_contrast = tukey_p < 0.05,
+           same_dist = levene_p >= 0.05,
+           relevant = abs(ratio) >= 4 | abs(ratio) <= 0.25,
+           show = sign_aov & sign_contrast &same_dist & relevant)
+  
+  
+  save(intraconsens_anova_res,
+       file = "data/processed/pig_intraconsensus_anova.Rdata")
+  
+}
+
+```
+
+
+
+```{r intra_consensus2, echo=FALSE, warning=FALSE}
+
+
+
+intraconsens_relevant_genes <- 
+  intraconsens_anova_res %>%
+  group_by(term) %>%
+  mutate(adj_p2 = p.adjust(aov_p, method = "BH")) %>% 
+  ungroup() %>%
+  filter(sign_aov & sign_contrast & relevant & adj_p2 < 0.05) %>%
+  left_join(pig_gene_classification) 
+
+intraconsens_gene_enrich_overlap <- 
+  intraconsens_relevant_genes %>% 
+  select(1:2, enhanced_tissues) %>% 
+  distinct() %>%
+  separate_rows(enhanced_tissues, sep = ",") %>%
+  left_join(intra_consensus_analysis_list %>%
+              left_join(tissue_mapping %>% 
+                          select(tissue_name, consensus_tissue_name),
+                        by = c("tissues" = "tissue_name")) %>% 
+              select(-tissues) %>% 
+              distinct()) %>%
+  mutate(overlap = case_when(is.na(enhanced_tissues) ~ "not tissue enriched",
+                             enhanced_tissues == consensus_tissue_name ~ "yes",
+                             enhanced_tissues != consensus_tissue_name ~ "no")) %>%
+  group_by(organ, enssscg_id) %>% 
+  summarise(is_overlap = case_when(any(overlap == "not tissue enriched") ~ "not tissue enriched",
+                                   any(overlap == "yes") ~ "yes",
+                                   T ~ "no"),
+            overlapping_tissues = paste(sort(unique(consensus_tissue_name[which(overlap == "yes")])), collapse = ",")) %>%
+  arrange(enssscg_id) %>% 
+  ungroup()
+
+intraconsens_final_res <- 
+  intraconsens_relevant_genes %>%
+  left_join(intraconsens_gene_enrich_overlap)
+
+intraconsens_final_res %>%
+  
+  select(organ, enssscg_id, tissue1, tissue2, ratio, p_value = adj_p2, is_overlap, overlapping_tissues) %>%
+  write_csv(savepath("intraconsensus results.csv"))
+
+######
+
+intraconsens_final_res %>%
+  group_by(organ, is_overlap) %>% 
+  summarise(n = n_distinct(enssscg_id)) %>% 
+  
+  group_by(organ) %>%
+  mutate(total_n = sum(n)) %>%
+  ungroup() %>%
+  arrange(total_n, organ, n) %>% 
+  mutate(organ = factor(organ, unique(organ))) %>%
+  ggplot(aes(n, organ, fill = is_overlap)) +
+  geom_col() +
+  scale_fill_manual(values = c("no" = "orangered", "yes" = "darkblue", "not tissue enriched" = "gray")) +
+  theme_minimal() +
+  ggtitle("Intraconsensus classification", "Overlap with tissue enrichment classification")
+ggsave(savepath("Intraconsens bar n genes overlap.pdf"), width = 6, height = 6)  
+
+heatmap_data <- 
+  anova_data %>%
+  inner_join(relevant_genes %>% 
+               select(organ, enssscg_id) %>%
+               unique()) %>%
+  group_by(enssscg_id, organ) %>% 
+  mutate(tmm = tmm / max(tmm, na.rm = T)) %>%
+  group_by(organ, tissue_name, enssscg_id) %>% 
+  summarise(tmm = mean(tmm)) %>%
+  
+  ungroup() 
+
+heatmap_data %>% 
+  select(organ, enssscg_id) %>% 
+  unique() %>% 
+  pull(organ) %>%
+  table()
+  
+pdf(savepath("Intraconsensus anova significant heatmaps.pdf"), width = 8, height = 7)
+plots <- 
+  lapply(intra_consensus_analysis_list %>% 
+           select(organ) %>% 
+           filter(!organ %in% c("Mesothelial tissue")) %>% 
+           unique() %>% 
+           pull(1),
+         function(orgn) {
+           print(orgn)
+           heatmap_data_organ <- 
+             heatmap_data %>%
+             filter(organ == orgn) %>% 
+             spread(tissue_name, tmm) %>%
+             select(-organ) %>%
+             column_to_rownames("enssscg_id") 
+           
+           heatmap_meta_organ <- 
+             intraconsens_gene_enrich_overlap %>% 
+             filter(organ == orgn) %>% 
+             select(enssscg_id, is_overlap) %>% 
+             column_to_rownames("enssscg_id")
+           
+           g <- 
+             heatmap_data_organ %>%
+             pheatmap(clustering_method = "ward.D2", 
+                      color = heatmap_palette,
+                      border_color = NA, 
+                      show_rownames = F, 
+                      annotation_row = heatmap_meta_organ,
+                      annotation_colors = list(is_overlap = c("no" = "orangered", 
+                                                              "yes" = "darkblue", 
+                                                              "not tissue enriched" = "gray")) ,
+                      main = orgn,
+                      silent = T)
+           
+           plot(g$gtable)
+         })
+
+dev.off()           
+  
+intraconsens_anova_res %>% 
+  filter(term != "Residuals") %>%
+  inner_join(intraconsens_final_res %>% 
+               select(organ, enssscg_id) %>% 
+               distinct()) %>%
+  filter(organ == "Lymphoid tissues") %>% 
+  filter(enssscg_id %in% enssscg_id[1:100]) %>%
+  # group_by(enssscg_id) %>%
+  select(organ, enssscg_id, tissue1, tissue2, ratio) %>%
+  bind_rows(rename(., 
+                   tissue1 = tissue2, 
+                   tissue2 = tissue1) %>%  
+              mutate(ratio = 1 / ratio)) %>%
+  mutate(ratio = log2(ratio)) %>%
+  spread(tissue2, ratio, fill = 0) %>%
+  group_by(enssscg_id) %>%
+  do({
+    g_data <<- .
+    
+    g_data %>% 
+      select(-1, -2) %>% 
+      column_to_rownames("tissue1") %>% 
+      pheatmap(clustering_method = "ward.D2",
+               cutree_rows = 2, cutree_cols = 2)
+  })
+
+
+gene_clusters <- 
+  heatmap_data %>%
+  dist() %>% 
+  hclust(method = "ward.D2") %>%
+  cutree(4) %>%
+  enframe("enssscg_id", "cluster") %>%
+  mutate(cluster = as.character(cluster))
+
+tissue_order <- 
+  heatmap_data %>%
+  t() %>%
+  dist() %>% 
+  hclust(method = "ward.D2") %>%
+  dendro_data()
+
+
+  
+heatmap_data %>%
+  pheatmap(clustering_method = "ward.D2", 
+           border_color = NA, 
+           show_rownames = F,
+           cutree_rows = 4,
+           annotation_row = gene_clusters %>% 
+             left_join(pig_gene_class %>%
+                          
+                         mutate(enriched_tissues = case_when(n_enriched == 1 ~ enriched_tissues,
+                                                             is.na(enriched_tissues) ~ "Not enriched",
+                                                             n_enriched > 1 ~ "Multiple")) %>% 
+                         select(gene, enriched_tissues), 
+                       by = c("enssscg_id" = "gene")) %>%
+             column_to_rownames("enssscg_id") ,
+           annotation_colors = list(enriched_tissues = c("Not enriched" = "gray", 
+                                                         "Multiple" = "black", 
+                                                         tissue_colors_palette_full_humanpig)),
+           filename = savepath("Lymph anova significant heatmap.pdf"),
+           width = 8, 
+           height = 7)
+       })
+dev.off()
+
+  
+heatmap_data <- 
+  anova_data %>%
+  filter(enssscg_id %in% relevant_genes$enssscg_id) %>%
+  group_by(enssscg_id) %>% 
+  mutate(tmm = tmm / max(tmm, na.rm = T)) %>%
+  group_by(tissue_name, enssscg_id) %>% 
+  summarise(tmm = mean(tmm)) %>%
+  
+  ungroup() %>% 
+  # filter(!complete.cases(.))
+  
+  spread(tissue_name, tmm) %>%
+  column_to_rownames("enssscg_id") 
+
+gene_clusters <- 
+  heatmap_data %>%
+  dist() %>% 
+  hclust(method = "ward.D2") %>%
+  cutree(4) %>%
+  enframe("enssscg_id", "cluster") %>%
+  mutate(cluster = as.character(cluster))
+
+tissue_order <- 
+  heatmap_data %>%
+  t() %>%
+  dist() %>% 
+  hclust(method = "ward.D2") %>%
+  dendro_data()
+
+
+  
+heatmap_data %>%
+  pheatmap(clustering_method = "ward.D2", 
+           border_color = NA, 
+           show_rownames = F,
+           cutree_rows = 4,
+           annotation_row = gene_clusters %>% 
+             left_join(pig_gene_class %>%
+                          
+                         mutate(enriched_tissues = case_when(n_enriched == 1 ~ enriched_tissues,
+                                                             is.na(enriched_tissues) ~ "Not enriched",
+                                                             n_enriched > 1 ~ "Multiple")) %>% 
+                         select(gene, enriched_tissues), 
+                       by = c("enssscg_id" = "gene")) %>%
+             column_to_rownames("enssscg_id") ,
+           annotation_colors = list(enriched_tissues = c("Not enriched" = "gray", 
+                                                         "Multiple" = "black", 
+                                                         tissue_colors_palette_full_humanpig)),
+           filename = savepath("Lymph anova significant heatmap.pdf"),
+           width = 8, 
+           height = 7)
+
+gene_clusters %>% 
+  filter(enssscg_id %in% relevant_genes$enssscg_id) %>%
+  left_join(gene_orthologs) %>%
+  
+  left_join(human_gene_class_bloodlineage) %>%
+  filter(specificity_category %in% c("Tissue enriched", "Group enriched")) %>%
+  separate_rows(enhanced_tissues, sep = ",") %>%
+  group_by(cluster, enhanced_tissues) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>%
+  mutate(enhanced_tissues = ifelse(is.na(enhanced_tissues), "Not elevated", enhanced_tissues)) %>%
+  {ggplot(., aes(n, cluster, fill = enhanced_tissues)) + 
+  scale_fill_manual(values = c("Not elevated" = "black", tissue_colors_palette_full)) + 
+  stripped_theme_facet} %>%
+  {. + geom_col(show.legend = F) + 
+      . + geom_col(position = "fill")}
+ggsave(savepath("Lymph anova sign n blood enriched per cluster.pdf"), width = 10, height = 6)
+
+
+anova_data %>% 
+  filter(enssscg_id %in% relevant_genes$enssscg_id) %>%
+  left_join(gene_clusters) %>% 
+  # head(10000) %>%
+  mutate(tissue_name = factor(tissue_name, tissue_order$labels$label)) %>%
+  group_by(enssscg_id) %>% 
+  mutate(tmm = tmm / max(tmm, na.rm = T)) %>%
+  group_by(tissue_name, enssscg_id, cluster) %>% 
+  summarise(tmm = mean(tmm)) %>%
+  ggplot(aes(tissue_name, tmm, group = enssscg_id)) + 
+  geom_line(alpha = 0.2) +
+  facet_wrap(~cluster) +
+  stripped_theme_facet + 
+  ylab("Fraction of max tmm")
+ggsave(savepath("Lymph anova sign cluster tendency.pdf"), width = 10, height = 6)
+
+gene_clusters %>% 
+  left_join(gene_mapping) %>% 
+  arrange(cluster) %>% 
+  View
+
+
+```
+
 
 #Figures
 
@@ -858,13 +1311,6 @@ tissue_wardclust <-
   dist() %>% 
   hclust(method = "ward.D2")
 
-tissue_spearclust <-
-  pig_atlas_tissue_name_wide_nx %>%
-  cor(method = "spearman") %>%
-  {1 - .} %>%
-  as.dist() %>%
-  hclust(method = "ward.D2")
-
 circular_dendrogram_retinastyle_2(clust = tissue_wardclust, 
                                 color_mapping = tissue_colors, 
                                 label_col = "tissue_name", 
@@ -878,6 +1324,7 @@ tissue_spearclust <-
   select(enssscg_id, tissue_name, tmm) %>% 
   
   spread(enssscg_id, tmm) %>%
+  mutate(tissue_name = str_to_sentence(tissue_name)) %>%
   column_to_rownames("tissue_name")  %>%
   t() %>%
   cor(method = "spearman") %>%
@@ -886,10 +1333,11 @@ tissue_spearclust <-
   hclust(method = "ward.D2")
 
 circular_dendrogram_retinastyle_2(clust = tissue_spearclust, 
-                                color_mapping = tissue_colors, 
+                                color_mapping = tissue_colors %>%
+                                  mutate(tissue_name = str_to_sentence(tissue_name)), 
                                 label_col = "tissue_name", 
-                                color_col = "tissue_color", arc_strength = 0)
-ggsave(savepath("Figure1 retinagram.pdf"), width = 10, height = 10)
+                                color_col = "tissue_color", arc_strength = 0, width_range = c(0.75, 7))
+ggsave(savepath("Figure1 retinagram.pdf"), width = 6, height = 6)
 ```
 
 
@@ -1501,7 +1949,7 @@ pig_atlas_tissue %>%
 
 ```{r}
 
-pig_atlas_sample
+
 xeno_ko_prop_res <- 
   pig_gene_propr_res %>%
   {.[, xeno_ko_genes$enssscg_id]} %>% 
@@ -1518,7 +1966,6 @@ xeno_ko_prop_res <-
          gene_id2 = name_id) %>%
   mutate(gene_id1 = ifelse(gene_name1 == "NULL", enssscg_id1, paste(gene_name1, enssscg_id1))) %>%
   select(enssscg_id1, enssscg_id2, gene_name1, gene_name2, gene_id2, gene_id1, prop)
-
 
 
 
@@ -1593,6 +2040,7 @@ ggsave(savepath("Network pig enrichment whole group.png"), width = 16, height = 
 
 prop_filter <- 0.999
 
+
 pig_atlas_sample %>%
   filter(enssscg_id %in% c("ENSSSCG00000003444", "ENSSSCG00000004183")) %>%
   select(1, 2, ptpm) %>%
@@ -1600,11 +2048,18 @@ pig_atlas_sample %>%
   ggplot(aes(ENSSSCG00000003444, ENSSSCG00000004183)) +
   geom_point()
     
-
-
-net_data <- 
+net_propr_data <- 
   pig_gene_propr_res_05filtered %>% 
   filter(abs(prop) > prop_filter)
+
+
+net_spear_data <- 
+  pig_gene_spearman_res %>% 
+  ungroup() %>%
+  filter(abs(cor) > 0.8 )
+
+net_data <- 
+  
   
 prop_gene_graph <-
   net_data %>%

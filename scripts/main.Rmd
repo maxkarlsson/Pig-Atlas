@@ -803,6 +803,13 @@ anova_data <-
 if(file.exists("data/processed/pig_intraconsensus_anova.Rdata")) {
   load("data/processed/pig_intraconsensus_anova.Rdata")
 } else {
+  require(multidplyr)
+  
+  
+  cluster <- new_cluster(detectCores() - 1)
+  
+  cluster_copy(cluster, names = c("%>%", "anova_data", "%$%", 
+                                  "omega_sq" ) )
   
   intraconsens_anova_diffs <- 
     anova_data %>% 
@@ -815,20 +822,16 @@ if(file.exists("data/processed/pig_intraconsensus_anova.Rdata")) {
               suffix = c("1", "2")) %>%
     filter(tissue1 != tissue2) %>%
     group_by(consensus_tissue_name, tissue1, tissue2, enssscg_id) %>%
+    partition(cluster) %>%
     summarise(mean_tmm1 = mean(tmm1, na.rm = T),
               mean_tmm2 = mean(tmm2, na.rm = T),
               ratio = max(mean_tmm1, 1) / max(mean_tmm2, 1)) %>% 
-    ungroup()
+    ungroup() %>%
+    collect()
   
   
   ####
-  require(multidplyr)
   
-  
-  cluster <- new_cluster(detectCores() - 1)
-  
-  cluster_copy(cluster, names = c("%>%", "anova_data", "%$%", 
-                                  "omega_sq" ) )
   
   intraconsens_anova_temp <- 
     anova_data %>% 
@@ -885,6 +888,21 @@ if(file.exists("data/processed/pig_intraconsensus_anova.Rdata")) {
   save(intraconsens_anova_res,
        file = "data/processed/pig_intraconsensus_anova.Rdata")
   
+  intraconsens_anova_res2 <- 
+    intraconsens_anova_res %>% 
+    select(consensus_tissue_name, 
+           enssscg_id,
+           term,
+           sqrt_omega,
+           mean_tmm1,
+           mean_tmm2,
+           ratio, 
+           diff,
+           adj_aov_p,
+           show)
+  
+  save(intraconsens_anova_res2,
+       file = "data/processed/pig_intraconsensus_anova2.Rdata")
 }
 
 ```

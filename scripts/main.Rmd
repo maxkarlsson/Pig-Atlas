@@ -782,81 +782,104 @@ anova_data <-
             by = c("tissue_ID" = "tissue")) %>% 
   mutate(sex = case_when(individual %in% c("a", "b") ~ "female",
                          individual %in% c("c", "d") ~ "male")) %>%
-  left_join(intra_consensus_analysis_list,
-            by = c("tissue_name" = "tissues")) %>%
-  filter(!is.na(organ))
-  
-if(file.exists("data/processed/pig_intraconsensus_anova.Rdata")) {
-  load("data/processed/pig_intraconsensus_anova.Rdata")
-} else {
-  intraconsens_anova_res <- 
-    anova_data %>% 
-    
-    group_by(enssscg_id, organ) %>% 
+  group_by(consensus_tissue_name) %>% 
+  mutate(n_tissues = n_distinct(tissue_name)) %>%
+  ungroup() %>%
+  filter(n_tissues > 1) %>%
+  select(enssscg_id, consensus_tissue_name, tissue_name, individual, sex, tmm) %>%
+  group_by(enssscg_id, consensus_tissue_name) %>% 
     mutate(sd_ = sd(tmm),
            max_ = max(tmm),
            range_ = max(tmm) / min(tmm[which(tmm > 0)])) %>%
     filter(sd_ > 0 & max_ > 1 & range_ >= 4) %>%
-    select(-sd_) %>% 
+    select(-sd_, -max_, -range_) %>%
+  ungroup() #%>%
+  # filter(enssscg_id %in% sample(unique(enssscg_id), 100)) 
+
+
+# save(anova_data,
+#      file = "data/processed/pig_intraconsensus_anova_data.Rdata")
+
+if(file.exists("data/processed/pig_intraconsensus_anova.Rdata")) {
+  load("data/processed/pig_intraconsensus_anova.Rdata")
+} else {
+  
+  intraconsens_anova_diffs <- 
+    anova_data %>% 
+    rename(tissue1 = tissue_name) %>%
+    left_join(., 
+              select(.,enssscg_id, consensus_tissue_name, tissue2 = tissue1, tmm, individual), 
+              by = c("consensus_tissue_name",
+                     "individual",
+                     "enssscg_id"),
+              suffix = c("1", "2")) %>%
+    filter(tissue1 != tissue2) %>%
+    group_by(consensus_tissue_name, tissue1, tissue2, enssscg_id) %>%
+    summarise(mean_tmm1 = mean(tmm1, na.rm = T),
+              mean_tmm2 = mean(tmm2, na.rm = T),
+              ratio = max(mean_tmm1, 1) / max(mean_tmm2, 1)) %>% 
+    ungroup()
+  
+  
+  ####
+  require(multidplyr)
+  
+  
+  cluster <- new_cluster(detectCores() - 1)
+  
+  cluster_copy(cluster, names = c("%>%", "anova_data", "%$%", 
+                                  "omega_sq" ) )
+  
+  intraconsens_anova_temp <- 
+    anova_data %>% 
+    group_by(enssscg_id, consensus_tissue_name) %>% 
+    partition(cluster) %>%
     do({
       g_data <- .
-      saved_data <<- g_data
+      # saved_data <<- g_data
       
       model <- aov(log2(tmm + 1) ~ tissue_name,
                    data = g_data)
       
-      
-      
-      
       aov_res <- 
         model %>%
-        tidy() %>%
-        left_join(omega_sq(model) %>% 
-                    enframe("term", "sqrt_omega") %>%
-                    mutate(term = trimws(term)), 
-                  by = "term")
+        broom::tidy() %>%
+        dplyr::left_join(omega_sq(model) %>% 
+                           tibble::enframe("term", "sqrt_omega"), 
+                         by = "term")
       
       
       tukey_res <- 
         TukeyHSD(model) %>%
-        map(.f = function(x) as_tibble(x, rownames = "Comparison")) %>%
-        bind_rows(.id = "term") %>%
-        separate(Comparison, into = c("tissue1", "tissue2"), sep = "-") %>% 
-        left_join(g_data %>%
-                    select(tissue_name, individual, tmm), 
-                  by = c("tissue1" = "tissue_name")) %>%
-        left_join(g_data %>%
-                    select(tissue_name, tmm, individual), 
-                  by = c("tissue2" = "tissue_name",
-                         "individual"),
-                  suffix = c("1", "2")) %>%
-        
-        group_by(term, tissue1, tissue2, diff, lwr, upr, `p adj`) %>%
-        summarise(mean_tmm1 = mean(tmm1, na.rm = T),
-                  mean_tmm2 = mean(tmm2, na.rm = T),
-                  ratio = max(mean_tmm1, 1) / max(mean_tmm2, 1)) %>% 
-        ungroup()
+        purrr::map(.f = function(x) tibble::as_tibble(x, rownames = "Comparison")) %>%
+        dplyr::bind_rows(.id = "term") %>%
+        tidyr::separate(Comparison, into = c("tissue1", "tissue2"), sep = "-") 
       
       
       aov_res %>% 
-        left_join(tukey_res,
-                  by = "term") %>% 
-        mutate(levene_p = lawstat::levene.test(log2(g_data$tmm + 1), 
-                                               g_data$tissue_name)$p.value)
+        dplyr::left_join(tukey_res,
+                         by = "term") 
     }) %>%
-    select(organ, enssscg_id, df, sumsq, meansq, sqrt_omega, statistic,
+    collect()
+  
+  #####
+    
+  
+  intraconsens_anova_res <- 
+    intraconsens_anova_temp %>% 
+    left_join(intraconsens_anova_diffs) %>%
+    select(consensus_tissue_name, enssscg_id, df, sumsq, meansq, sqrt_omega, statistic,
            aov_p = p.value, 
            tissue1, tissue2, 
            tukey_p = `p adj`,
            everything()) %>%
-    group_by(term, organ) %>%
+    group_by(term) %>%
     mutate(adj_aov_p = p.adjust(aov_p, method = "BH")) %>%
     ungroup() %>%
     mutate(sign_aov = adj_aov_p < 0.05,
            sign_contrast = tukey_p < 0.05,
-           same_dist = levene_p >= 0.05,
            relevant = abs(ratio) >= 4 | abs(ratio) <= 0.25,
-           show = sign_aov & sign_contrast &same_dist & relevant)
+           show = sign_aov & sign_contrast & relevant)
   
   
   save(intraconsens_anova_res,

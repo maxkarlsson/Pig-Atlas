@@ -104,3 +104,36 @@ bigcorPar <- function(x, nblocks = 10, verbose = TRUE, ncore="all", ...){
   gc()
   return(corMAT)
 }
+
+
+pdf_multiple <- 
+  function(plots, filepath, widths, heights) {
+    
+    filename <- gsub("^.*/", "", filepath)
+    filepath_ <- gsub(paste0(filename, "$"), "", filepath)
+    
+    temp_folder <- paste0(filepath_, "TEMP_FOLDER")
+    
+    dir.create(temp_folder, showWarnings = FALSE)
+    
+    for(i in 1:length(plots)) {
+      # pdf(paste0(temp_folder, "/TEMP", i, ".pdf"), width = widths[i], height = heights[i])
+      ggsave(paste0(temp_folder, "/TEMP", i, ".pdf"), width = widths[i], height = heights[i], plot = plots[[i]], 
+             limitsize = FALSE)
+      # dev.off()
+    }
+    
+    wd <- getwd()
+    
+    setwd(temp_folder)
+    
+    system(paste0('pdftk *pdf cat output "../', filename, '"'), 
+           intern = F)
+    
+    setwd(wd)
+    
+    unlink(temp_folder, recursive = T)
+    
+    
+  }
+

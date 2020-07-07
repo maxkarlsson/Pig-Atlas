@@ -906,7 +906,8 @@ pairwise_subcat_alluvial_plot <-
   }
 
 multi_alluvial_plot <- 
-  function(data, vars, chunk_levels, pal, color_by = c(1, 3, 3)) {
+  function(data, vars, chunk_levels, pal, color_by = c(1, 3, 3),
+           width = 1/3) {
     
     selvars = vars
     
@@ -936,9 +937,11 @@ multi_alluvial_plot <-
                  y = 1)) +
       
       geom_flow(aes(fill = chunk_color), 
-                show.legend = F) +
+                show.legend = F,
+                width = width) +
       geom_stratum(aes(fill = chunk), 
-                   show.legend = F, color = NA) +
+                   show.legend = F, color = NA,
+                   width = width) +
       
       scale_x_discrete(expand = c(.1, .1), position = "top") +
       scale_fill_manual(values = pal) + 
@@ -952,8 +955,19 @@ multi_alluvial_plot <-
     
     
     
-    flow_data <- 
-      ggplot_build(alluv_1)$data[[1]]  
+    
+    flow_data <-
+      ggplot_build(alluv_1)$data[[1]] %>%
+      as_tibble() %>%
+      {
+        if("side" %in% names(.)) {
+          .
+        } else{
+          mutate(.,
+                 side = case_when(contact == "back" ~ "start",
+                                  contact == "front" ~ "end"))
+        }}
+    
     
     stratum_data <- 
       ggplot_build(alluv_1)$data[[2]]
@@ -961,25 +975,28 @@ multi_alluvial_plot <-
     flow_data_labels <-
       flow_data %>% 
       as_tibble() %>% 
+      
       select(x, stratum, group, side, ymin, ymax) %>% 
-      multispread(c(side), c(x, stratum, ymin, ymax)) %>% 
-      mutate_at(c("end_x", "end_ymax", "end_ymin", "start_x", "start_ymax", "start_ymin"), as.numeric) %>% 
-      group_by(start_stratum, end_stratum, start_x, end_x) %>%
-      summarise(end_y = (min(end_ymin) + max(end_ymax)) / 2, 
-                start_y = (min(start_ymin) + max(start_ymax)) / 2, 
-                size = max(start_ymax) - min(start_ymin))
+      pivot_wider(names_from = side, values_from = c(x, stratum, ymin, ymax)) %>%
+      
+      mutate_at(c("x_end", "ymax_end", "ymin_end", "x_start", "ymax_start", "ymin_start"), as.numeric) %>% 
+      group_by(stratum_start, stratum_end, x_start, x_end) %>%
+      summarise(y_end = (min(ymin_end) + max(ymax_end)) / 2, 
+                y_start = (min(ymin_start) + max(ymax_start)) / 2, 
+                size = max(ymax_start) - min(ymin_start))
+    
     alluv_1 <- 
       alluv_1 +
       geom_text(data = flow_data_labels,
-                aes(x = start_x + 1/6,
-                    y = start_y, 
+                aes(x = x_start + width/2,
+                    y = y_start, 
                     label = size), 
                 inherit.aes = F, 
                 size = 3, 
                 hjust = 0) +
       geom_text(data = flow_data_labels,
-                aes(x = end_x - 1/6,
-                    y = end_y, 
+                aes(x = x_end - width/2,
+                    y = y_end, 
                     label = size), 
                 inherit.aes = F, 
                 size = 3, 

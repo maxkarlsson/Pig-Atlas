@@ -1,4 +1,5 @@
-
+library(viridis)
+library(magrittr)
 # ----- colors & factor levels -----
 
 spec_category_levels <- 
@@ -206,6 +207,12 @@ elevation_overlap_pal2 <-
     "Enriched in both" = "#004369", 
     "Enriched in Pig" = "#01949A")
 
+overlap_type_pal <- 
+  c("Human" = "#DB1F48",
+    "Overlap" = "#004369", 
+    "Pig" = "#01949A", 
+    "Different tissues" = "orangered")
+
 # protein_type_pal <- 
 #   c("secreted" = '#911D51',
 #     "membrane" = '#6D4BAA', 
@@ -228,6 +235,20 @@ elevation_overlap_pal2 <-
 #                                   "intracellular and secreted isoforms" = "#CF5734",
 #                                   "membrane and secreted isoforms" = "#755A85",
 #                                   "intracellular, membrane, secreted isoforms" = "#794A39")
+
+
+variability_levels <- 
+  c("variable and elevated",
+    "variable - elevated elsewhere",
+    "variable - not elevated",
+    "not variable - elevated")
+    
+variability_palette <- 
+  c("variable and elevated" = "#0081a7",
+    "variable - elevated elsewhere" = "#00afb9",
+    "variable - not elevated" = "#fed9b7",
+    "not variable - elevated" = "#f07167")
+
 
 # ----- themes -----
 

@@ -349,7 +349,71 @@ make_ortholog_net <-
 
 
 
-
+classification_hypergeom_test <- 
+  function(class1, class2, gene_col1, gene_col2, orthologs, sep = ";") {
+    
+    class1_long <- 
+      class1 %>% 
+      select(gene1 = gene_col1, enhanced_tissues) %>%
+      mutate(enhanced_tissues = ifelse(is.na(enhanced_tissues), 
+                                       "not enriched",
+                                       enhanced_tissues),
+             enriched1 = T) %>%
+      separate_rows(enhanced_tissues, sep = sep)
+    
+    class2_long <- 
+      class2 %>% 
+      select(gene2 = gene_col2, enhanced_tissues) %>%
+      mutate(enhanced_tissues = ifelse(is.na(enhanced_tissues), 
+                                       "not enriched",
+                                       enhanced_tissues),
+             enriched2 = T) %>%
+      separate_rows(enhanced_tissues, sep = sep)
+    
+    tis_ <- 
+      unique(c(class1_long$enhanced_tissues,
+               class2_long$enhanced_tissues)) %>%
+      sort()
+    
+    
+    
+    
+    expand.grid(id1 = tis_,
+                id2 = tis_,
+                gene = 1:nrow(gene_orthologs)) %>%
+      as_tibble() %>%
+      left_join(orthologs %>% 
+                  select(gene1 = gene_col1,
+                         gene2 = gene_col2) %>%
+                  mutate(gene = row_number())) %>% 
+      select(-gene) %>%
+      left_join(class1_long,
+                by = c("gene1", "id1" = "enhanced_tissues")) %>%
+      left_join(class2_long,
+                by = c("gene2", "id2" = "enhanced_tissues")) %>%
+      mutate(enriched1 = ifelse(is.na(enriched1), 
+                                F,
+                                enriched1),
+             enriched2 = ifelse(is.na(enriched2), 
+                                F,
+                                enriched2)) %>%
+      group_by(id1, id2, enriched1, enriched2) %>% 
+      count() %>% 
+      group_by(id1, id2) %>%
+      summarise( 
+        # q is the number of successes
+        q = sum(n[which(enriched1 & enriched2)]),
+        
+        # k is the number of tries - i.e. the number of genes that are elevated for either species
+        k = sum(n[which(enriched1 | enriched2)]),
+        
+        # m is the number of possible successes - i.e. the number of genes that are elevated for either
+        m = min(sum(n[which(enriched1)]),
+                sum(n[which(enriched2)])),
+        
+        # n is the population size - i.e. the number of genes
+        n = sum(n) - m)
+  }
 
 
 

@@ -631,6 +631,13 @@ circular_dendrogram_retinastyle_2 <-
     
     g <-
       ggraph(dendrogram, layout = 'dendrogram', circular = T)
+    # 
+    # g +
+    #   geom_edge_fan(data = edge_data %>%
+    #                    mutate(hghl = edge.id == 99),
+    #                  aes(label = edge_id, color = as.factor(rank_radius)),
+    #                  width =4) +
+    #   geom_node_text(aes(label = label))
     
     edge_data <- 
       get_edges()(g$data) %>%
@@ -656,7 +663,6 @@ circular_dendrogram_retinastyle_2 <-
       set_names(color, edge_id)
     
     
-    
     for(rank_rad in 2:max(edge_data$rank_radius)) {
       edge_id_colors_new <- 
         left_join(edge_data %>%
@@ -670,7 +676,7 @@ circular_dendrogram_retinastyle_2 <-
                   by = c("edge_id.y" = "name")) %>%
         group_by(edge_id.x) %>% 
         summarise(color = ifelse(n_distinct(value) == 1 & any(value != default_color), 
-                                 unique(value),
+                                 as.character(unique(value)),
                                  default_color)) %$%
         set_names(color, edge_id.x)
       edge_id_colors <- 
@@ -1917,6 +1923,8 @@ umap_score_plot <- function(umap_scores, group_mapping, mapping_col, group_col, 
   
   
 }
+
+
 
 # ----- correlation plots -----
 

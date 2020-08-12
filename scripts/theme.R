@@ -241,13 +241,15 @@ variability_levels <-
   c("variable and elevated",
     "variable - elevated elsewhere",
     "variable - not elevated",
-    "not variable - elevated")
+    "not variable - elevated",
+    "elevated in tissue")
     
 variability_palette <- 
   c("variable and elevated" = "#0081a7",
     "variable - elevated elsewhere" = "#00afb9",
     "variable - not elevated" = "#fed9b7",
-    "not variable - elevated" = "#f07167")
+    "not variable - elevated" = "#f07167",
+    "elevated in tissue" = "#f07167")
 
 
 # ----- themes -----

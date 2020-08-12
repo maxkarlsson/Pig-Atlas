@@ -12,6 +12,16 @@ rename <- dplyr::rename
 source("scripts/theme.R")
 source("scripts/functions_utility.R")
 load("data/processed/gene_overlap_comparison.Rdata")
+load("data/processed/merged_path_matrix_human_pig_mapped_5.Rdata")
+
+metabol_pws_merged <- 
+  keep_matrix %>% 
+  as_tibble(rownames = "mutual_id") %>%
+  gather(pathway, y, -1) %>% 
+  filter(y == 1) %>% 
+  select(-y) %>%
+  separate(mutual_id, into = c("enssscg_id", "ensg_id"))
+
 
 if(file.exists("data/processed/normalized_res.Rdata")) {
   load("data/processed/normalized_res.Rdata")
@@ -22,6 +32,7 @@ if(file.exists("data/processed/normalized_res.Rdata")) {
 }
 
 
+gene_orthologs <- read_csv("data/processed/gene_orthologs.csv")
 
 gene_mapping <- 
   read_delim("data/meta/ensembl_pig_gene.tab", delim = "\t") %>% 
@@ -30,20 +41,6 @@ gene_chromosome <- read_delim("data/meta/ensembl92_gene_chromosome.txt", delim =
 
 human_gene_mapping <- read_delim("data/meta/human/geninfo_92.tsv", delim = "\t")
 
-gene_orthologs_all <- 
-  read_delim("data/meta/Ensembl_orthologs_all.txt", delim = "\t") %>% 
-  select(enssscg_id = 1,
-         ensg_id = 3, 
-         pig_gene_name = 2,
-         human_gene_name = 4,
-         ortholog_confidence = 10, 
-         ortholog_type = 5,
-         gene_order_conservation_score = 8, 
-         whole_genome_alignment_coverage = 9, 
-         sequence_identity = 6) %>%
-  filter(!is.na(ortholog_confidence)) %>% 
-  filter(ensg_id %in% human_gene_mapping$ensg_id) %>%
-  filter(enssscg_id %in% gene_mapping$enssscg_id)
 
 ######
 
@@ -61,7 +58,7 @@ metabol_pws <-
 ######
 
 metabol_pws %>% 
-  left_join(gene_orthologs_all) %>% 
+  left_join(gene_orthologs) %>% 
   select(ensg_id, enssscg_id, ortholog_type) %>% 
   distinct() %>%
   group_by(ensg_id) %>% 
@@ -80,7 +77,7 @@ metabol_pws %>%
 ggsave(savepath("Number gene overlap metabolism.pdf"), width = 5, height = 5)  
 
 metabol_pws %>% 
-  left_join(gene_orthologs_all) %>% 
+  left_join(gene_orthologs) %>% 
   group_by(pathway, ensg_id) %>% 
   summarise(n_orths = n_distinct(enssscg_id[which(!is.na(enssscg_id))])) %>%
   mutate(has_orth = ifelse(n_orths > 0, "orth", "no_orth")) %>% 
@@ -106,7 +103,7 @@ cor_data <-
   select(mutual_id, comparison_tissue, species, mutual_tmm) %>% 
   separate(mutual_id, into = c("enssscg_id", "ensg_id")) %>%
   inner_join(metabol_pws) %>% 
-  left_join(gene_orthologs_all %>% 
+  left_join(gene_orthologs %>% 
               select(1:6)) %>%
   mutate(mutual_tmm = log10(mutual_tmm + 1)) %>%
   spread(species, mutual_tmm)
@@ -204,7 +201,7 @@ metabol_pws_tis_prop %>%
 
 gene_overlap_data_summarized <- 
   gene_overlap_data %>%
-  left_join(gene_orthologs_all) %>%
+  left_join(gene_orthologs) %>%
   group_by(enssscg_id,
            ensg_id, 
            gene_name = human_gene_name) %>%
@@ -221,12 +218,35 @@ gene_overlap_data_summarized <-
                                                           "Not detected")) ~ "Human")) %>%
   ungroup()
 
+
+metabol_pws %>%
+  filter(ensg_id %in% gene_overlap_data$ensg_id) %>%
+  left_join(gene_overlap_data_summarized) %>%
+  group_by(pathway, type) %>% 
+  count() %>% 
+  spread(type, n, fill = 0) %>% 
+  gather(type, n, -1) %>%
+  group_by(pathway) %>% 
+  mutate(fract = n / sum(n)) %>% 
+  ungroup() %>%
+  arrange(fract) %>%
+  mutate(pathway = factor(pathway, filter(., type == "Overlap") %>% pull(pathway)),
+         type = factor(type, c("Overlap", "Human", "Pig", "Different tissues"))) %>% 
+  
+  ggplot(aes(fract, pathway, fill = type)) + 
+  geom_col() +
+  scale_fill_manual(values = overlap_type_pal) + 
+  stripped_theme +
+  theme(legend.position = "top")
+ggsave(savepath("Metabol pathway enrichment overlap.pdf"), width = 6, height = 15)  
+
+
 plot_data <-
   joined_atlas_comparison %>%
   select(mutual_id, comparison_tissue, species, mutual_tmm) %>%
   separate(mutual_id, into = c("enssscg_id", "ensg_id")) %>%
-  left_join(gene_orthologs_all) %>%
-  filter(ortholog_type == "ortholog_one2one" & ortholog_confidence == 1) %>%
+  inner_join(gene_orthologs) %>%
+  
   
   # mutate(mutual_tmm = ifelse(mutual_tmm < 1, 0, mutual_tmm)) %>%
   
@@ -298,10 +318,10 @@ plots <-
              
              gene_order <- 
                plot_data %>% 
-                 ungroup() %>%
-                 filter(ensg_id %in% filter_ensg) %>%
-                 select(comparison_tissue, species, mutual_tmm, gene_name) %>%
-                   spread(species, mutual_tmm) %>%
+               ungroup() %>%
+               filter(ensg_id %in% filter_ensg) %>%
+               select(comparison_tissue, species, mutual_tmm, gene_name) %>%
+               spread(species, mutual_tmm) %>%
                group_by(gene_name) %>% 
                summarise(dist = sqrt(sum((human - pig) ^ 2))) %>% 
                arrange(dist) %>% 
@@ -430,7 +450,193 @@ pdf_multiple(plots,
 
 ######
 
+filt_pws <- 
+  c("Pool reactions",
+    "Vitamin B6 metabolism",
+    "Pantothenate and CoA biosynthesis",
+    "Ascorbate and aldarate metabolism",
+    "Acyl-CoA hydrolysis",
+    "Carnitine shuttle (mitochondrial)",
+    "Terpenoid backbone biosynthesis",
+    "Thiamine metabolism",
+    "Blood group biosynthesis",
+    "Androgen metabolism") %>%
+  sort()
 
+plots <- 
+  lapply(filt_pws,
+         function(pw) {
+           cat(paste(pw, "\n"))
+           filter_ensg <- 
+             metabol_pws_merged %>% 
+             filter(pathway == pw) %>% 
+             pull(ensg_id)
+           
+           cluster_data <-
+             plot_data %>%
+             ungroup() %>%
+             filter(ensg_id %in% filter_ensg) %>%
+             select(comparison_tissue, species, mutual_tmm, gene_name) %>%
+             group_by(gene_name, comparison_tissue) %>%
+             summarise(mutual_tmm = mean(mutual_tmm)) %>%
+             spread(gene_name, mutual_tmm) %>%
+             column_to_rownames("comparison_tissue")
+           
+           # cluster_data <-
+           #   plot_data %>% 
+           #   ungroup() %>%
+           #   filter(ensg_id %in% filter_ensg) %>%
+           #   select(comparison_tissue, species, mutual_tmm, gene_name) %>%
+           #     spread(species, mutual_tmm) %>%
+           #   mutate(diff = human - pig) %>% 
+           #     select(-human, -pig) %>% 
+           #     spread(gene_name, diff) %>%
+           #   column_to_rownames("comparison_tissue") 
+           
+           tis_cluster <- 
+             cluster_data %>%
+             dist() %>% 
+             hclust(method = "ward.D2")
+           
+           tis_order <- 
+             tis_cluster$labels[tis_cluster$order]
+           
+           if(dim(cluster_data)[2] >= 2) {
+             # gene_cluster <- 
+             #   cluster_data %>%
+             #   t() %>%
+             #   dist() %>% 
+             #   hclust(method = "ward.D2")
+             
+             gene_order <- 
+               plot_data %>% 
+               ungroup() %>%
+               filter(ensg_id %in% filter_ensg) %>%
+               select(comparison_tissue, species, mutual_tmm, gene_name) %>%
+               spread(species, mutual_tmm) %>%
+               group_by(gene_name) %>% 
+               summarise(dist = sqrt(sum((human - pig) ^ 2))) %>% 
+               arrange(dist) %>% 
+               pull(gene_name)
+             
+             
+           } else {
+             gene_cluster <- 
+               tibble(labels = colnames(cluster_data),
+                      order = 1)
+             
+             gene_order <- 
+               gene_cluster$labels[gene_cluster$order]
+             
+           }
+           
+           
+           
+           # Plot:
+           
+           plot_data %>% 
+             ungroup() %>%
+             filter(ensg_id %in% filter_ensg) %>%
+             select(gene_name, species) %>% 
+             distinct() %>%
+             mutate(species = toupper(substr(species, 1, 1))) %>%
+             mutate(gene_name = factor(gene_name, gene_order)) %>%
+             
+             
+             ggplot(aes(1, gene_name, group = species, fill = species, label = species)) +
+             geom_tile(show.legend = F, 
+                       position = "dodge", 
+                       height = 0.9) +
+             geom_text(position = position_dodge(width = 1), 
+                       size = 2, 
+                       fontface = "bold",
+                       color = "white") +
+             scale_fill_manual(values = c("H" = "#DB1F48",
+                                          "P" = "#01949A")) +
+             scale_x_discrete(limits = "Species") +
+             theme_void() +
+             theme(plot.margin = unit(c(0,0,0,0), "mm"),
+                   axis.text.x = element_text(angle = 90, hjust = 0, size = 6, vjust = 0.2)) +
+             
+             # Specificity
+             plot_data3 %>%
+             filter(ensg_id %in% filter_ensg) %>%
+             mutate(gene_name = factor(gene_name, gene_order)) %>%
+             
+             ggplot(aes(1, gene_name, group = species, fill = spec_category, label = species)) +
+             geom_tile(show.legend = F,
+                       position = "dodge", 
+                       height = 0.9, width = 1) +
+             # geom_text(position = position_dodge(width = 1), 
+             #           size = 2, 
+             #           fontface = "bold",
+             #           color = "white") +
+             scale_fill_manual(values = gene_category_pal) +
+             scale_x_discrete(limits = "Specificity") +
+             theme_void() +
+             theme(plot.margin = unit(c(0,0,0,0), "mm"),
+                   axis.text.x = element_text(angle = 90, hjust = 0, size = 6, vjust = 0.2)) +
+             
+             
+             # Overlap
+             plot_data2 %>%
+             filter(ensg_id %in% filter_ensg) %>%
+             mutate(gene_name = factor(gene_name, gene_order)) %>%
+             
+             ggplot(aes(1, gene_name, fill = type)) +
+             geom_tile(show.legend = F,
+                       height = 0.9) +
+             scale_fill_manual(values = overlap_type_pal) +
+             scale_x_discrete(limits = "Overlap") +
+             theme_void() +
+             theme(axis.text.x = element_text(angle = 90, hjust = 0, size = 6, vjust = 0.2)) + 
+             
+             # Heatmap
+             plot_data %>% 
+             ungroup() %>%
+             filter(ensg_id %in% filter_ensg) %>%
+             mutate(gene_name = factor(gene_name, gene_order),
+                    comparison_tissue = factor(comparison_tissue, tis_order)) %>%
+             
+             ggplot(aes(gene_name, comparison_tissue, group = species, fill = mutual_tmm)) +
+             geom_tile(position= "dodge", width = 0.9) +
+             coord_flip() +
+             scale_fill_viridis_c(option = "B", direction = -1, name = "Expression") +
+             # facet_grid(ensg_id ~ .) + 
+             # facet_wrap(~gene_name, ncol = 1, strip.position = "left") + 
+             stripped_theme_facet +
+             theme(axis.text.x = element_text(angle = 60, hjust = 1),
+                   strip.placement = "outside",
+                   strip.text.y.left = element_text(angle = 0),
+                   panel.spacing = unit(0, "mm"),
+                   legend.position = "right",
+                   panel.border = element_rect(fill = NA, color = "white"),
+                   axis.title = element_blank(), 
+                   axis.line = element_blank()) +
+             theme(plot.margin = unit(c(0,0,0,0), "mm")) +
+             ggtitle(pw) +
+             
+             
+             plot_layout(widths = c(0.025, 0.025, 0.025, 1), nrow = 1)
+         })
+
+plot_heights <- 
+  plot_data %>% 
+  ungroup() %>% 
+  select(ensg_id) %>% 
+  distinct() %>% 
+  inner_join(metabol_pws)  %>%
+  filter(pathway %in% filt_pws) %>%
+  group_by(pathway) %>%
+  summarise(n = n()) %>%
+  arrange(pathway) %>% 
+  mutate(height = 2 + 0.3*n / 2)  
+
+
+pdf_multiple(plots, 
+             filepath = savepath("metabolism merged pathways expression heatmaps.pdf"), 
+             widths = rep(6, nrow(plot_heights)), 
+             heights = plot_heights$height)
 
 # ----- Visualize KEGG pathways ------
   

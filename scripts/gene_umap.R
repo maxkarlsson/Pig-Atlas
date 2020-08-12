@@ -182,7 +182,7 @@ pig_gene_cluster <- pig_gene_cluster_km
 #             suffix = c("_km", "_density")) %>% 
 #   mutate(cluster = factor(unclass(factor(paste(cluster_km, cluster_density)))))
 
-pig_gene_umap <- 
+pig_gene_umap_temp2 <- 
   pig_gene_umap_temp %>%
   left_join(pig_gene_cluster) %>% 
   group_by(cluster_old = cluster) %>%
@@ -245,11 +245,12 @@ pig_gene_umap <-
 # ----- Hypergeometric test ------
 
 pig_gene_cluster_enrich_hyper_test_data <- 
-  pig_gene_umap %>%
+  pig_gene_umap_temp2 %>%
   # head(1000) %>%
   select(enssscg_id, cluster) %>%
   left_join(pig_gene_classification) %>% 
-  mutate(enhanced_tissues = ifelse(is.na(enhanced_tissues), "not enriched", enhanced_tissues)) %>%
+  mutate(enhanced_tissues = ifelse(is.na(enhanced_tissues), 
+                                   "not enriched", enhanced_tissues)) %>%
   separate_rows(enhanced_tissues, sep = ";") %>%
   
   {
@@ -284,7 +285,7 @@ pig_gene_cluster_enrich_hyper <-
   # Testing the chance of getting the observed number or higher per cluster and tissue type
   summarise(p_value = phyper(q - 1, m, n, k, lower.tail = F)) %>%
   ungroup() %>%
-  mutate(p_value = ifelse(p_value == 0, 1e-300, p_value),
+  mutate(p_value = ifelse(p_value == 0, .Machine$double.xmin, p_value),
          adj_pval = p.adjust(p_value, method = "BH"),
          sign_level = case_when(adj_pval < 0.00000001 ~ 8,
                                 adj_pval < 0.0000001 ~ 7,
@@ -314,7 +315,7 @@ pig_gene_cluster_enrich_hyper <-
 # ----- Cluster merging -----
 
 pig_gene_umap_cluster_props <- 
-  pig_gene_umap %>% 
+  pig_gene_umap_temp2 %>% 
   select(cluster, enssscg_id, V1, V2) %>%
   group_by(cluster) %>% 
   summarise(radius = sqrt((max(V1) - min(V1))^2 +
@@ -360,7 +361,7 @@ pig_gene_umap_cluster_adjacent <-
             by = c("cluster2" = "cluster"), 
             suffix = c("1", "2")) %>%
   mutate(dist = sqrt((V11 - V12)^2 + (V21 - V22)^2)) %>%
-    filter(dist < 0.1) %>%
+    filter(dist < 0.2) %>%
     select(cluster1, cluster2) %>% 
     distinct() %>% 
     bind_rows(tibble(cluster1 = .$cluster2,
@@ -369,9 +370,33 @@ pig_gene_umap_cluster_adjacent <-
            adjacent_cluster = cluster2)
 
 plot_data <- 
-  pig_gene_umap %>% 
-  left_join(pig_gene_umap_cluster_adjacent)
+  pig_gene_umap_temp2 %>% 
+  left_join(pig_gene_umap_cluster_adjacent) %>%
+  group_by(cluster) %>% 
+  mutate(mean_V1 = mean(V1),
+         mean_V2 = mean(V2),
+         dist = sqrt((V1 - mean_V1)^2 + (V2 - mean_V2)^2),
+         n = n()) %>% 
+  arrange(cluster, dist) 
 
+plot <- 
+  plot_data %>%
+  ggplot(aes(V1, V2)) +
+  geom_hex(aes(fill = 1),
+           data = plot_data,
+           fill = "gray90",
+           bins = plot_bins) +
+  geom_text(data = . %>% 
+              select(cluster, mean_V1, mean_V2, n) %>% 
+              distinct(),
+            aes(mean_V1, mean_V2, label = cluster),
+            size = 2,
+            alpha = 0.6,
+            show.legend = F) +
+  stripped_theme +
+  scale_fill_manual(values = c("selected" = "green3", "adjacent" = "red", "not adjacent" = "gray")) +
+  scale_color_manual(values = c("selected" = "green3", "adjacent" = "red", "not adjacent" = "gray"))
+  
 plots <- 
   lapply(unique(plot_data$cluster),
          function(clus_) {
@@ -381,29 +406,15 @@ plots <-
              pig_gene_umap_cluster_adjacent %>% 
              filter(cluster == clus_)
            
-           plot_data %>% 
+           plt_dat <- 
+             plot_data %>% 
              mutate(cluster_type = case_when(cluster == clus_ ~ "selected",
                                              cluster %in% adjacent_clusters$adjacent_cluster ~ "adjacent",
-                                             T ~ "not adjacent")) %>%
-             group_by(cluster) %>% 
-             mutate(mean_V1 = mean(V1),
-                    mean_V2 = mean(V2),
-                    dist = sqrt((V1 - mean_V1)^2 + (V2 - mean_V2)^2),
-                    n = n()) %>% 
-             # select(V1, V2, dist, cluster, n) %>% 
-             arrange(cluster, dist) %>% 
-             # mutate(cum_member = cumsum(1/n)) %>% 
-             # filter(cum_member < 0.9) %>%
-             # mutate(hull = row_number() %in% chull(V1, V2)) %>% 
-             # filter(hull) %>%
-             # mutate(hull = order(chull(V1, V2))) %>%
-             # arrange(cluster, hull) %>%
-             ggplot(aes(V1, V2)) +
-             geom_hex(aes(fill = 1),
-                      data = plot_data,
-                      fill = "gray90",
-                      bins = plot_bins) +
-             geom_encircle(aes(group = cluster, 
+                                             T ~ "not adjacent")) 
+             
+           plot +
+             geom_encircle(data = plt_dat,
+                           aes(group = cluster, 
                                fill = cluster_type, 
                                color = cluster_type),
                            alpha = 0.1, 
@@ -411,23 +422,16 @@ plots <-
                            expand=0,
                            # color = "white",
                            show.legend = F) +
-             geom_encircle(aes(group = cluster, 
+             geom_encircle(data = plt_dat,
+                           aes(group = cluster, 
                                color = cluster_type),
                            fill = NA,
                            alpha = 0.7, 
                            s_shape=1, 
                            expand=0,
                            # color = "white",
-                           show.legend = F) +
-             geom_text(data = . %>% 
-                         select(cluster, mean_V1, mean_V2, n) %>% 
-                         distinct(),
-                       aes(mean_V1, mean_V2, label = cluster),
-                       size = 2,
-                       alpha = 0.6,
-                       show.legend = F) +
-             stripped_theme +
-             scale_fill_manual(values = c("selected" = "green3", "adjacent" = "red", "not adjacent" = "gray"))
+                           show.legend = F)
+             
          })
 
 pdf(savepath("UMAP adjacent clusters.pdf"), width = 6, height = 6)
@@ -436,16 +440,305 @@ dev.off()
 
 
 
+pig_gene_cluster_enrich_hyper_clust <- 
+  pig_gene_cluster_enrich_hyper %>% 
+  select(enhanced_tissues, cluster, adj_pval, log_p) %>%
+  mutate(log_p = ifelse(adj_pval < 0.05, 1, 0)) %>%
+  select(-adj_pval) %>%
+  spread(cluster, log_p, fill = 0) %>% 
+  column_to_rownames("enhanced_tissues") %>%
+  t() %>%
+  dist() %>% 
+  hclust(method = "ward.D2")
+
+
+
+similar_clusters <- 
+  cutree(pig_gene_cluster_enrich_hyper_clust, h = 0.1) %>% 
+  enframe("cluster", "similar_cluster") %>% 
+  mutate(similar_cluster = as.character(similar_cluster))
+  
+
 pig_gene_cluster_enrich_hyper %>% 
-  select(enhanced_tissues, cluster, log_p) %>%
+  select(enhanced_tissues, cluster, adj_pval, log_p) %>%
   group_by(enhanced_tissues, cluster) %>%
   mutate(log_p = min(log_p, 20)) %>%
   ungroup() %>% 
-  mutate(log_p = ifelse(log_p < 3, 0, log_p)) %>%
-  spread(cluster, log_p) %>% 
+  mutate(log_p = ifelse(adj_pval < 0.05, 1, 0)) %>%
+  select(-adj_pval) %>%
+  spread(cluster, log_p, fill = 0) %>% 
   column_to_rownames("enhanced_tissues") %>%
-  dist() %>% 
-  hclust(method = "ward.D2")
+  pheatmap(clustering_method = "ward.D2",
+           cutree_cols = n_distinct(similar_clusters$similar_cluster),
+           annotation_col = similar_clusters %>% 
+             column_to_rownames("cluster"), 
+           filename = savepath("UMAP similar clusters heatmap.pdf"),
+           width = 15, 
+           height = 6)
+
+
+
+pig_gene_umap_merged_clusters <-
+  pig_gene_umap_cluster_adjacent %>%
+  left_join(similar_clusters) %>% 
+  left_join(similar_clusters,
+            by = c("adjacent_cluster" = "cluster"),
+            suffix = c("", "_adj")) %>%
+  left_join(pig_gene_umap_temp2 %>% 
+              group_by(cluster) %>% 
+              count()) %>%
+  
+  mutate(similar_adj = similar_cluster == similar_cluster_adj) %>%
+  
+  filter(similar_adj | n < 25) %>% 
+  select(1:2) %>% 
+  graph_from_data_frame(directed = F) %>%
+  components() %$%
+  membership %>%
+  enframe("cluster", "merged_cluster") %>%
+    right_join(pig_gene_umap_temp2 %>% 
+                 select(cluster) %>% 
+                 distinct()) %>% 
+    mutate(merged_cluster = ifelse(is.na(merged_cluster),
+                                   cluster,
+                                   paste("mg", merged_cluster)))
+
+
+# # pig_gene_umap_merged_clusters
+# pig_gene_umap_cluster_adjacent %>%
+#   left_join(pig_gene_umap %>% 
+#               group_by(cluster) %>% 
+#               count()) %>%
+#   filter(n < 20) %>% 
+#   graph_from_data_frame(directed = F) %>%
+#   components() %$%
+#   membership %>%
+#   enframe("cluster", "merged_cluster") %>%
+#   arrange(merged_cluster)
+
+
+pig_gene_umap <- 
+  pig_gene_umap_temp2 %>% 
+  left_join(pig_gene_umap_merged_clusters) %>%
+  group_by(merged_cluster_old = merged_cluster) %>%
+  mutate(V1_mean = mean(V1),
+         V2_mean = mean(V2)) %>% 
+  ungroup() %>%
+  arrange(-V2_mean,
+          V1_mean) %>%
+  mutate(merged_cluster = factor(unclass(factor(merged_cluster_old, unique(merged_cluster_old)))))
+
+plot_data <-
+  pig_gene_umap %>%
+  left_join(pig_gene_classification)
+#
+# ####
+# plot_data %>%
+#   group_by(merged_cluster) %>%
+#   mutate(mean_V1 = mean(V1),
+#          mean_V2 = mean(V2),
+#          dist = sqrt((V1 - mean_V1)^2 + (V2 - mean_V2)^2),
+#          n = n()) %>%
+#   # select(V1, V2, dist, louvain, n) %>%
+#   arrange(merged_cluster, dist) %>%
+#   mutate(cum_member = cumsum(1/n)) %>%
+#   # filter(cum_member < 0.9) %>%
+#   mutate(hull = row_number() %in% chull(V1, V2)) %>%
+#   filter(hull) %>%
+#   mutate(hull = order(chull(V1, V2))) %>%
+#   arrange(merged_cluster, hull) %>%
+#   ggplot(aes(V1, V2)) +
+#   geom_hex(aes(fill = 1),
+#            data = plot_data,
+#            fill = "gray90",
+#            bins = plot_bins) +
+#   geom_encircle(aes(fill = merged_cluster,
+#                     color = merged_cluster),
+#                 alpha = 0.1,
+#                 s_shape=1,
+#                 expand=0,
+#                 # color = "white",
+#                 show.legend = F) +
+#   geom_encircle(aes(color = merged_cluster),
+#                 fill = NA,
+#                 alpha = 0.7,
+#                 s_shape=1,
+#                 expand=0,
+#                 # color = "white",
+#                 show.legend = F) +
+#   geom_text(data = . %>%
+#               select(merged_cluster, mean_V1, mean_V2, n) %>%
+#               distinct(),
+#             aes(mean_V1, mean_V2, label = merged_cluster),
+#             show.legend = F) +
+#   geom_point(data = km_centers,
+#              aes(mean_V1, mean_V2),
+#              inherit.aes = F) +
+#   stripped_theme
+
+
+pig_gene_umap %>%
+  group_by(merged_cluster) %>%
+  mutate(mean_V1 = mean(V1),
+         mean_V2 = mean(V2),
+         dist = sqrt((V1 - mean_V1)^2 + (V2 - mean_V2)^2),
+         n = n()) %>%
+  ggplot(aes(V1, V2)) +
+  geom_hex(aes(fill = 1),
+           fill = "gray90",
+           bins = plot_bins) +
+  geom_text(data = . %>% 
+              select(merged_cluster, mean_V1, mean_V2, n) %>% 
+              distinct(),
+            aes(mean_V1, mean_V2, label = merged_cluster),
+            size = 2,
+            alpha = 0.6,
+            show.legend = F) +
+  geom_encircle(aes(group = cluster),
+                alpha = 0.1, 
+                s_shape=1, 
+                expand=0,
+                fill = "gray",
+                color = "black",
+                show.legend = F) +
+  geom_encircle(data = . %>%
+                  filter(grepl("^mg", merged_cluster_old)),
+                aes(group = merged_cluster, 
+                    color = merged_cluster,
+                    fill = merged_cluster),
+                
+                alpha = 0.5, 
+                s_shape=1, 
+                expand=0,
+                # color = "white",
+                show.legend = F) +
+  stripped_theme 
+ggsave(savepath("UMAP merged clusters.pdf"), width = 6, height = 6)
+
+
+
+# ----- Hypergeometric test ------
+
+pig_gene_cluster_enrich_hyper_test_data <- 
+  pig_gene_umap %>%
+  # head(1000) %>%
+  select(enssscg_id, merged_cluster) %>%
+  left_join(pig_gene_classification) %>% 
+  mutate(enhanced_tissues = ifelse(is.na(enhanced_tissues), 
+                                   "not enriched", enhanced_tissues)) %>%
+  separate_rows(enhanced_tissues, sep = ";") %>%
+  
+  {
+    # q is the number of successes
+    q <- 
+      group_by(., enhanced_tissues, merged_cluster, .drop = F) %>%
+      summarise(q = n_distinct(enssscg_id))
+    # k is the number of tries - i.e. the cluster size
+    k <- 
+      group_by(., merged_cluster, .drop = F) %>%
+      summarise(k = n_distinct(enssscg_id))
+    
+    # m is the number of possible successes
+    m <- 
+      group_by(., enhanced_tissues, .drop = F) %>%
+      summarise(m = n_distinct(enssscg_id))
+    
+    # n is the population size - i.e. the number of genes
+    n <- n_distinct(.$enssscg_id)
+    
+    q %>% 
+      left_join(k) %>% 
+      left_join(m) %>%
+      # n is the population size - i.e. the number of genes
+      mutate(n = n - m) 
+    
+  } 
+
+pig_gene_cluster_enrich_hyper <- 
+  pig_gene_cluster_enrich_hyper_test_data %>%
+  group_by(enhanced_tissues, merged_cluster) %>%
+  # Testing the chance of getting the observed number or higher per cluster and tissue type
+  summarise(p_value = phyper(q - 1, m, n, k, lower.tail = F)) %>%
+  ungroup() %>%
+  mutate(p_value = ifelse(p_value == 0, .Machine$double.xmin, p_value),
+         adj_pval = p.adjust(p_value, method = "BH"),
+         sign_level = case_when(adj_pval < 0.00000001 ~ 8,
+                                adj_pval < 0.0000001 ~ 7,
+                                adj_pval < 0.000001 ~ 6,
+                                adj_pval < 0.00001 ~ 5,
+                                adj_pval < 0.0001 ~ 4,
+                                adj_pval < 0.001 ~ 3,
+                                adj_pval < 0.01 ~ 2,
+                                adj_pval < 0.05 ~ 1,
+                                T ~ 0),
+         log_p = -log10(adj_pval))
+
+# pig_gene_cluster_enrich_hyper %>% 
+#   select(enhanced_tissues, merged_cluster, log_p) %>%
+#   group_by(enhanced_tissues, merged_cluster) %>%
+#   mutate(log_p = min(log_p, 20)) %>%
+#   ungroup() %>% 
+#   mutate(log_p = ifelse(log_p < 3, 0, 1)) %>%
+#   spread(merged_cluster, log_p) %>% 
+#   column_to_rownames("enhanced_tissues") %>%
+#   pheatmap(clustering_method = "ward.D2")
+
+# 
+# 
+# pig_gene_cluster_only_enrich_hyper_test_data <- 
+#   pig_gene_umap %>%
+#   # head(1000) %>%
+#   select(enssscg_id, merged_cluster) %>%
+#   left_join(pig_gene_classification) %>% 
+#   mutate(enhanced_tissues = ifelse(is.na(enhanced_tissues) | specificity_category == "Tissue enhanced", 
+#                                    "not enriched", enhanced_tissues)) %>%
+#   separate_rows(enhanced_tissues, sep = ";") %>%
+#   
+#   {
+#     # q is the number of successes
+#     q <- 
+#       group_by(., enhanced_tissues, merged_cluster, .drop = F) %>%
+#       summarise(q = n_distinct(enssscg_id))
+#     # k is the number of tries - i.e. the cluster size
+#     k <- 
+#       group_by(., merged_cluster, .drop = F) %>%
+#       summarise(k = n_distinct(enssscg_id))
+#     
+#     # m is the number of possible successes
+#     m <- 
+#       group_by(., enhanced_tissues, .drop = F) %>%
+#       summarise(m = n_distinct(enssscg_id))
+#     
+#     # n is the population size - i.e. the number of genes
+#     n <- n_distinct(.$enssscg_id)
+#     
+#     q %>% 
+#       left_join(k) %>% 
+#       left_join(m) %>%
+#       # n is the population size - i.e. the number of genes
+#       mutate(n = n - m) 
+#     
+#   } 
+# 
+# pig_gene_cluster_only_enrich_hyper <- 
+#   pig_gene_cluster_only_enrich_hyper_test_data %>%
+#   group_by(enhanced_tissues, merged_cluster) %>%
+#   # Testing the chance of getting the observed number or higher per cluster and tissue type
+#   summarise(p_value = phyper(q - 1, m, n, k, lower.tail = F)) %>%
+#   ungroup() %>%
+#   mutate(p_value = ifelse(p_value == 0, 1e-300, p_value),
+#          adj_pval = p.adjust(p_value, method = "BH"),
+#          sign_level = case_when(adj_pval < 0.00000001 ~ 8,
+#                                 adj_pval < 0.0000001 ~ 7,
+#                                 adj_pval < 0.000001 ~ 6,
+#                                 adj_pval < 0.00001 ~ 5,
+#                                 adj_pval < 0.0001 ~ 4,
+#                                 adj_pval < 0.001 ~ 3,
+#                                 adj_pval < 0.01 ~ 2,
+#                                 adj_pval < 0.05 ~ 1,
+#                                 T ~ 0),
+#          log_p = -log10(adj_pval))
+#####
 
 
 # Save

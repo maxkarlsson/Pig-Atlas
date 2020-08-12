@@ -4,6 +4,13 @@
 pig_atlas_sample_temp <-
   read_delim("data/processed/pig_filtered_sample_data.tab", delim = "\t")
 
+pig_atlas_tissue <-
+  read_delim("data/HPA/consensus_pig_all_tissues_92.tsv", delim = "\t") %>%
+  rename(enssscg_id = ensg_id,
+         tissue_name = tissue) %>%
+  mutate(tissue_name = gsub(" 1$", "", tissue_name) %>%
+           gsub("facial adipose tissue", "orbital adipose tissue", .) %>%
+           trimws())
 
 ## Tissue data
 human_atlas_tissue <-
@@ -58,25 +65,13 @@ pig_atlas_sample_norm <-
 
 
 # Aggregate to tissue data
-pig_atlas_tissue <- 
-  pig_atlas_sample_norm %>% 
-  group_by(enssscg_id, tissue_ID) %>% 
-  summarise(tpm = mean(tpm), 
-            ptpm = mean(ptpm), 
-            tmm = mean(tmm), 
-            nx = mean(nx)) %>% 
-  ungroup()
-
-
-
-##Aggregation
 
 
 pig_atlas_comparison <- 
   pig_atlas_tissue %>% 
   inner_join(tissue_mapping %>% 
-               select(tissue, comparison_tissue), 
-             by = c("tissue_ID" = "tissue")) %>%
+               select(tissue_name, comparison_tissue), 
+             by = "tissue_name") %>%
   group_by(enssscg_id, comparison_tissue) %>% 
   summarise(tpm = max(tpm), 
             ptpm = max(ptpm), 

@@ -390,6 +390,17 @@ disease_genes_selected <-
          disease = Disease,
          organ = Organ)
 
+disease_genes_selected2 <-
+  readxl::read_xlsx("data/meta/alun disease gene list 2.xlsx", sheet = 2)  %>%
+  select(1:4, gene = 5) %>%
+  separate_rows(gene, sep = ", ") %>%
+  left_join(gene_orthologs,
+            by = c("gene" = "human_gene_name")) %>% 
+  select(enssscg_id, ensg_id, 
+         gene_name = gene, 
+         disease = Disease,
+         organ = Organ)
+
 # disease_genes %>%
 #   filter(!is.na(disease)) %>%
 #   write_csv(savepath("HPA_E92_disease_genes.csv"))
@@ -3309,6 +3320,38 @@ if(file.exists("data/processed/gene_overlap_comparison.Rdata")) {
   
 } else {
   
+  human_pig_gene_class_comparison_long_all_orth <- 
+    full_join(gene_orthologs_all %>% 
+                left_join(human_gene_comparison_classification %>%
+                            separate_rows(enhanced_tissues, sep = ";") %>% 
+                            select(ensg_id,
+                                   enriched_tissues = enhanced_tissues, 
+                                   spec_score = ts_score, 
+                                   spec_category = specificity_category,
+                                   dist_category = distribution_category) %>%
+                            mutate(enriched_tissues = ifelse(is.na(enriched_tissues), "", 
+                                                                   enriched_tissues)), 
+                          by = "ensg_id") %>% 
+                mutate(comparison_id = enriched_tissues),
+              
+              
+              gene_orthologs_all %>% 
+                left_join(pig_gene_comparison_classification %>%
+                            separate_rows(enhanced_tissues, sep = ";") %>% 
+                            select(enssscg_id,
+                                   enriched_tissues = enhanced_tissues, 
+                                   spec_score = ts_score, 
+                                   spec_category = specificity_category,
+                                   dist_category = distribution_category) %>%
+                            mutate(enriched_tissues = ifelse(is.na(enriched_tissues), "", 
+                                                                   enriched_tissues)), 
+                          by = "enssscg_id") %>% 
+                mutate(comparison_id = enriched_tissues),
+              by = c("enssscg_id", "ensg_id", "ortholog_type", "comparison_id"), 
+              suffix = c("_human", "_pig")) %>% 
+    select(1, 2, 3, enriched_tissues_human, enriched_tissues_pig, comparison_id, everything()) 
+  
+  
   human_pig_gene_class_comparison_long <- 
     full_join(gene_orthologs %>% 
                 left_join(human_gene_comparison_classification %>%
@@ -3504,11 +3547,56 @@ if(file.exists("data/processed/gene_overlap_comparison.Rdata")) {
                                                             "Not detected")) ~ "Human")) %>%
     ungroup()
   
+  gene_overlap_data_all_orth <- 
+    human_pig_gene_class_comparison_long_all_orth %>% 
+    left_join(human_gene_comparison_classification %>%
+                select(1:2),
+              by = c("ensg_id")) %>%
+    left_join(pig_gene_comparison_classification %>%
+                select(1:2),
+              by = c("enssscg_id"), 
+              suffix = c("_human", "_pig")) %>%
+    
+    group_by(comparison_id, enssscg_id, ensg_id, 
+             spec_score_human, spec_score_pig, 
+             spec_category_human, spec_category_pig) %>%
+    summarise(type = case_when(any(!is.na(enriched_tissues_human) & 
+                                     !is.na(enriched_tissues_pig)) |
+                                 all(is.na(enriched_tissues_human) & 
+                                     is.na(enriched_tissues_pig)) ~ "Overlap",
+                               all(is.na(enriched_tissues_human)) ~ "Pig", 
+                               all(is.na(enriched_tissues_pig)) ~ "Human")) %>%
+    ungroup() %>%
+    arrange(enssscg_id, ensg_id, comparison_id)
+  
+  gene_overlap_data_all_orth_summarized <- 
+    gene_overlap_data_all_orth %>%
+    left_join(gene_orthologs_all) %>%
+    group_by(enssscg_id,
+             ensg_id, 
+             gene_name = human_gene_name) %>%
+    summarise(type = case_when(any(type == "Overlap") ~ "Overlap",
+                               any(type == "Pig") & 
+                                 any(type == "Human") &
+                                 (!any(spec_category_human %in% c("Low tissue specificity", 
+                                                                  "Not detected")) &
+                                    !any(spec_category_pig %in% c("Low tissue specificity", 
+                                                                  "Not detected"))) ~ "Different tissues",
+                               any(spec_category_human %in% c("Low tissue specificity", 
+                                                              "Not detected")) ~ "Pig",
+                               any(spec_category_pig %in% c("Low tissue specificity", 
+                                                            "Not detected")) ~ "Human")) %>%
+    ungroup()
+  
+  
+  
   
   save(list = c("human_pig_gene_class_comparison_long",
                 "human_pig_gene_class_comparison", 
                 "gene_overlap_data",
-                "gene_overlap_data_summarized"),
+                "gene_overlap_data_summarized",
+                "gene_overlap_data_all_orth",
+                "gene_overlap_data_all_orth_summarized"),
        file = "data/processed/gene_overlap_comparison.Rdata")
   
   human_pig_gene_class_comparison %>% 
@@ -4528,10 +4616,10 @@ plot_data1 <-
   t() %>%
   {log10(. + 1)}
 
-set.seed(42)
+set.seed(44)
 plot_data <- 
   plot_data1 %>%
-  umap(n_neighbors = 5, n_epochs = 1000)
+  uwot::umap(n_neighbors = 5, n_epochs = 1000)
 
 plot_data %>% 
   as.tibble() %>% 
@@ -4602,29 +4690,324 @@ plot_data1 %>%
 
 ```
 
+###Sequence identity comparisons
+
+```{r}
+gene_overlap_data_all_orth_summarized %>%
+  left_join(gene_orthologs_all) %>%
+  ggplot(aes(type, sequence_identity)) +
+  geom_violin(draw_quantiles = 0.5,
+              fill = "gray90") +
+  ggpubr::stat_compare_means(comparisons = list(c('Different tissues', 'Overlap'),
+                                                c('Human', 'Overlap'),
+                                                c('Pig', 'Overlap')),
+                             method = "wilcox.test",
+                             size=3, paired = F) +
+  geom_text(data = . %>% 
+              group_by(type) %>% 
+              summarise(mean = median(sequence_identity)),
+            aes(y = mean, label = paste(round(mean, 1), "%")),
+            vjust = 0) +
+  stripped_theme
+  
+ggsave(savepath("sequence identity per overlap all orth.pdf"),
+       width = 4, height = 4)
+
+gene_overlap_data_all_orth_summarized %>%
+  left_join(human_gene_comparison_classification %>% 
+              select(ensg_id, specificity_category),
+            by = "ensg_id") %>%
+  left_join(pig_gene_comparison_classification %>% 
+              select(enssscg_id, specificity_category),
+            by = "enssscg_id",
+            suffix = c("_human", "_pig")) %>%
+  mutate(elevated = specificity_category_human %in% c("Tissue enhanced", 
+                                                      "Tissue enriched",
+                                                      "Group enriched") |
+           specificity_category_pig %in% c("Tissue enhanced", 
+                                           "Tissue enriched",
+                                           "Group enriched"),
+         enriched = specificity_category_human %in% c("Tissue enriched",
+                                                      "Group enriched") |
+           specificity_category_pig %in% c("Tissue enriched",
+                                           "Group enriched"),
+         type2 = case_when(type == "Overlap" & enriched ~ "Overlap\nenriched",
+                           type == "Overlap" & elevated ~ "Overlap\nelevated",
+                           type == "Overlap" & !elevated ~ "Overlap\nlow specificity",
+                           T ~ type)) %>%
+  left_join(gene_orthologs_all) %>%
+
+
+  ggplot(aes(type2, sequence_identity)) +
+  geom_violin(draw_quantiles = 0.5,
+              fill = "gray90") +
+  geom_text(data = . %>% 
+              group_by(type2) %>% 
+              summarise(mean = median(sequence_identity)),
+            aes(y = mean, label = paste(round(mean, 1), "%")),
+            vjust = 0) +
+  stripped_theme
+  
+ggsave(savepath("sequence identity per overlap all orth 2.pdf"),
+       width = 6, height = 4)
+
+gene_overlap_data_all_orth_summarized %>%
+  left_join(human_gene_comparison_classification %>% 
+              select(ensg_id, specificity_category),
+            by = "ensg_id") %>%
+  left_join(pig_gene_comparison_classification %>% 
+              select(enssscg_id, specificity_category),
+            by = "enssscg_id",
+            suffix = c("_human", "_pig")) %>%
+  
+  left_join(gene_orthologs_all) %>%
+
+
+  ggplot(aes(specificity_category_pig, sequence_identity)) +
+  geom_violin(draw_quantiles = 0.5,
+              fill = "gray90") +
+  geom_text(data = . %>% 
+              group_by(specificity_category_pig) %>% 
+              summarise(mean = median(sequence_identity)),
+            aes(y = mean, label = paste(round(mean, 1), "%")),
+            vjust = 0) +
+  stripped_theme
+  
+ggsave(savepath("sequence identity per pig class all orth.pdf"),
+       width = 6, height = 4)
+
+pig_gene_umap %>%
+  select(enssscg_id, merged_cluster) %>%
+  left_join(gene_orthologs_all) %>%
+  filter(!is.na(ensg_id)) %>%
+  ggplot(aes(sequence_identity, merged_cluster)) +
+  geom_boxplot(fill = "gray90", 
+               outlier.colour = NA) +
+  geom_text(data = . %>% 
+              group_by(merged_cluster) %>% 
+              summarise(mean = median(sequence_identity)),
+            aes(x = mean, y = merged_cluster, label = paste(round(mean, 1), "%")),
+            hjust = 0) +
+  stripped_theme
+
+#### Abundance
+
+joined_atlas_comparison %>%
+  separate(mutual_id, into = c("enssscg_id", "ensg_id"), sep = "_") %>%
+  group_by(enssscg_id, ensg_id, species) %>% 
+  summarise(mutual_tmm = max(mutual_tmm, na.rm = T)) %>% 
+  
+  left_join(gene_orthologs_all) %>%
+  group_by(species) %>% 
+  mutate(cor = cor(log10(mutual_tmm + 1), sequence_identity, method = "spearman", use = "pairwise.complete.obs")) %>%
+  ggplot(aes(log10(mutual_tmm + 1), sequence_identity)) +
+  geom_hex(aes(fill = stat(log10(count))), 
+           bins = 100) +
+  facet_wrap(~species + round(cor, 3)) +
+  scale_fill_viridis() +
+  stripped_theme_facet
+ggsave(savepath("sequence identity vs tmm hex.pdf"),
+       width = 8, height = 4)
+
+
+# linear model
+
+seq_id_anova <- 
+  joined_atlas_comparison %>%
+  # head(100) %>%
+  separate(mutual_id, into = c("enssscg_id", "ensg_id"), sep = "_") %>%
+  group_by(enssscg_id, ensg_id) %>% 
+  summarise(mutual_tmm = max(mutual_tmm, na.rm = T)) %>%
+  ungroup() %>% 
+  mutate(exp_quartile = as.factor(unclass(cut(mutual_tmm, breaks = quantile(mutual_tmm), include.lowest = T)))) %>%
+  left_join(gene_orthologs_all) %>%
+  
+  left_join(human_gene_comparison_classification %>% 
+              select(ensg_id, specificity_category),
+            by = "ensg_id") %>%
+  left_join(pig_gene_comparison_classification %>% 
+              select(enssscg_id, specificity_category),
+            by = "enssscg_id",
+            suffix = c("_human", "_pig")) %>% 
+  left_join(gene_overlap_data_all_orth_summarized) %>%
+  mutate(elevated = ifelse(specificity_category_human %in% c("Tissue enhanced", 
+                                                             "Tissue enriched",
+                                                             "Group enriched") |
+                             specificity_category_pig %in% c("Tissue enhanced", 
+                                                             "Tissue enriched",
+                                                             "Group enriched"),
+                           "yes",
+                           "no"),
+         enriched = ifelse(specificity_category_human %in% c("Tissue enriched",
+                                                             "Group enriched") |
+                             specificity_category_pig %in% c("Tissue enriched",
+                                                             "Group enriched"),
+                           "yes",
+                           "no"),
+         overlap = ifelse(type == "Overlap",
+                          "yes", 
+                          "no")) %>%
+  aov(sequence_identity ~ 
+        exp_quartile + 
+        overlap + 
+        elevated,
+      data = .)
+
+seq_id_anova$coefficients %>%
+  enframe("coefficient", "estimate") %>%
+  ggplot(aes(estimate, coefficient)) +
+  geom_col()
+omega_sq(seq_id_anova) %>%
+  enframe("coefficient", "var_exp") %>%
+  ggplot(aes(var_exp, coefficient)) +
+  geom_col() +
+  geom_text(aes(label = paste0(100 * round(var_exp, 4), "%")),
+            hjust = 0) +
+  scale_x_continuous(expand = expansion(0),
+                     limits = c(0,1)) +
+  stripped_theme
+  
+
+
+
+
+
+cor_orth_anova <- 
+  joined_atlas_comparison %>%
+  # head(100) %>%
+  separate(mutual_id, into = c("enssscg_id", "ensg_id"), sep = "_") %>%
+  select(enssscg_id, ensg_id, comparison_tissue, species, ptpm) %>%
+  spread(species, ptpm) %>%
+  group_by(enssscg_id, ensg_id) %>% 
+  summarise(cor = cor(human, pig, use = "pairwise.complete.obs", method = "spearman")) %>%
+  ungroup() %>% 
+  left_join(joined_atlas_comparison %>%
+              # head(100) %>%
+              separate(mutual_id, into = c("enssscg_id", "ensg_id"), sep = "_") %>%
+              group_by(enssscg_id, ensg_id) %>% 
+              summarise(mutual_tmm = max(mutual_tmm, na.rm = T)) %>%
+              ungroup() %>% 
+              mutate(exp_quartile = as.factor(unclass(cut(mutual_tmm, 
+                                                          breaks = quantile(mutual_tmm), 
+                                                          include.lowest = T))))) %>%
+  
+  left_join(gene_orthologs_all) %>%
+  
+  left_join(human_gene_comparison_classification %>% 
+              select(ensg_id, specificity_category),
+            by = "ensg_id") %>%
+  left_join(pig_gene_comparison_classification %>% 
+              select(enssscg_id, specificity_category),
+            by = "enssscg_id",
+            suffix = c("_human", "_pig")) %>% 
+  left_join(gene_overlap_data_all_orth_summarized) %>%
+  mutate(elevated = ifelse(specificity_category_human %in% c("Tissue enhanced", 
+                                                             "Tissue enriched",
+                                                             "Group enriched") |
+                             specificity_category_pig %in% c("Tissue enhanced", 
+                                                             "Tissue enriched",
+                                                             "Group enriched"),
+                           "yes",
+                           "no"),
+         enriched = ifelse(specificity_category_human %in% c("Tissue enriched",
+                                                             "Group enriched") |
+                             specificity_category_pig %in% c("Tissue enriched",
+                                                             "Group enriched"),
+                           "yes",
+                           "no"),
+         overlap = ifelse(type == "Overlap",
+                          "yes", 
+                          "no")) %>%
+  mutate(exp_quartile = factor(exp_quartile, 1:4),
+         overlap = factor(overlap),
+         elevated = factor(elevated)) %>%
+  aov(cor ~ 
+        sequence_identity +
+        gene_order_conservation_score +
+        whole_genome_alignment_coverage +
+        exp_quartile + 
+        overlap:elevated,
+      data = .)
+
+cor_orth_anova$coefficients %>%
+  enframe("coefficient", "estimate") %>%
+  ggplot(aes(estimate, coefficient)) +
+  geom_col()
+omega_sq(cor_orth_anova) %>%
+  enframe("coefficient", "var_exp") %>%
+  ggplot(aes(var_exp, coefficient)) +
+  geom_col() +
+  geom_text(aes(label = paste0(100 * round(var_exp, 4), "%")),
+            hjust = 0) +
+  scale_x_continuous(expand = expansion(0),
+                     limits = c(0,1)) +
+  stripped_theme
+
+```
+
+
+
 ##Figure 6
 
 ##Figure 7
 
-###Selected genes
+
+###Selected genes 3
 
 ```{r}
+
+
+plot_genes <- 
+  disease_gene_classes %>%
+  filter(gene_name %in% c("PLP1",
+                          "MBP",
+                          "ABDB11",
+                          "PDX1",
+                          "GCGR",
+                          "TNNT2",
+                          "NPPA",
+                          "LEPR",
+                          "GRXCR2")) %>%
+  mutate(disease = disease %>% 
+           gsub("^H\\d{5}  ", "", .) %>% 
+           gsub(" \\[.*\\]$", "", .)) %>%
+  group_by(ensg_id, gene_name) %>% 
+  summarise(disease = paste(sort(unique(disease)), collapse = ";"),
+            disease_type = paste(sort(unique(disease_type)), collapse = ";"),
+            disease_system = paste(sort(unique(disease_system)), collapse = ";"))
 
 
 plot_data <- 
   joined_atlas_comparison %>% 
   separate(mutual_id, into = c("enssscg_id", "ensg_id")) %>% 
-  inner_join(disease_genes_selected) %>%
+  inner_join(plot_genes) %>%
   group_by(enssscg_id, species) %>% 
   mutate(max_tmm = max(mutual_tmm, na.rm = T),
+         mutual_tmm1 = mutual_tmm,
          mutual_tmm = ifelse(max_tmm == 0, 0, mutual_tmm / max_tmm)) %>%
   left_join(human_gene_mapping) 
 
 
+plot_data_frac <- 
+  plot_data %>%
+  select(comparison_tissue, species, ptpm, gene_name, enssscg_id) %>%
+  group_by(comparison_tissue, species) %>%
+  mutate(frac = 100 * ptpm / sum(ptpm, na.rm = T),
+         label = ifelse(frac >= 10, paste0(round(frac, 1), "%"), NA)) %>%
+  
+  left_join(select(., -label, -ptpm) %>% 
+              spread(species, frac) %>%
+              group_by(comparison_tissue) %>%
+              summarise(cor = cor(human, pig, method = "spearman")) %>%
+              select(comparison_tissue, cor)) %>%
+  ungroup() %>%
+  arrange(cor) %>% 
+  mutate(comparison_tissue = factor(comparison_tissue, unique(comparison_tissue)),
+         species = factor(species, c("human", "pig"))) 
 
 plot_data2 <-
   gene_overlap_data_summarized %>%
-  inner_join(disease_genes_selected) 
+  inner_join(plot_genes)
 
 plot_data3 <-
   human_pig_gene_class_comparison %>% 
@@ -4635,7 +5018,7 @@ plot_data3 <-
   left_join(human_gene_mapping) %>%
   gather(species, spec_category, spec_category_pig, spec_category_human) %>%
   mutate(species = str_to_sentence(gsub("spec_category_", "", species))) %>%
-  left_join(disease_genes_selected)
+  inner_join(plot_genes)
 
 
 #####
@@ -4663,7 +5046,7 @@ tis_order <-
 gene_order <- 
   plot_data %>% 
   ungroup() %>%
-  arrange(disease) %>% 
+  arrange(disease_type) %>% 
   pull(gene_name) %>% 
   unique()
   
@@ -4681,7 +5064,7 @@ disease_order <-
 
 plot_data %>% 
   ungroup() %>%
-  select(gene_name, species, disease) %>% 
+  select(gene_name, species, disease, disease) %>% 
   distinct() %>%
   mutate(species = toupper(substr(species, 1, 1))) %>%
   mutate(gene_name = factor(gene_name, gene_order),
@@ -4752,7 +5135,7 @@ plot_data %>%
   geom_tile(position= "dodge", width = 0.9) +
   coord_flip() +
   scale_fill_viridis_c(option = "B", direction = -1, name = "Expression") +
-  facet_grid(disease ~ ., scales = "free", space = "free") +
+  facet_grid(disease ~ ., scales = "free", space = "free", labeller = label_wrap_gen()) +
   # facet_wrap(~disease, ncol = 1, strip.position = "right") +
   stripped_theme_facet +
   theme(axis.text.x = element_text(angle = 60, hjust = 1),
@@ -4770,8 +5153,9 @@ plot_data %>%
   
   plot_layout(widths = c(0.025, 0.025, 0.025, 1), nrow = 1)
 
-ggsave(savepath("Fig7 selected genes heatmap 2.pdf"),
-       width = 9, height = 8)
+ggsave(savepath("Fig7 selected genes heatmap 4.pdf"),
+       width = 8, height = 4)
+
 
 ```
 
@@ -5064,15 +5448,19 @@ cor_data <-
   joined_atlas_comparison %>% 
   select(mutual_id, comparison_tissue, species, mutual_tmm) %>% 
   separate(mutual_id, into = c("enssscg_id", "ensg_id")) %>%
-  inner_join(disease_genes_full) %>% 
-  left_join(gene_orthologs %>% 
-              select(1:6)) %>%
+  
+  inner_join(disease_gene_classes %>% 
+               distinct) %>% 
+  inner_join(gene_orthologs %>% 
+               select(1:6)) %>%
   mutate(mutual_tmm = log10(mutual_tmm + 1)) %>%
   spread(species, mutual_tmm)
 
 disease_gene_cor <-
   cor_data %>% 
-  group_by(disease, enssscg_id, ensg_id, pig_gene_name, human_gene_name, ortholog_type, ortholog_confidence) %>% 
+  group_by(disease_system, disease_type, disease, 
+           enssscg_id, ensg_id, gene_name, 
+           ortholog_type, ortholog_confidence) %>% 
   do({
     cor.test(.$human, .$pig, method = "pearson") %>% 
       tidy()
@@ -5082,13 +5470,28 @@ disease_gene_cor <-
 
 
 disease_gene_cor %>% 
-  group_by(disease) %>%
+  select(-disease_type, -disease) %>% 
+  distinct() %>% 
+  left_join(gene_overlap_data_summarized) %>%
+  group_by(disease_system) %>%
   mutate(median = median(estimate, na.rm = T)) %>% 
   ungroup() %>% 
   arrange(median) %>%
-  mutate(disease = factor(disease, unique(disease))) %>%
-  ggplot(aes(disease, estimate)) +
+  mutate(disease_system = factor(disease_system, unique(disease_system))) %>%
+  ggplot(aes(disease_system, estimate)) +
   geom_boxplot(fill = "lightgray") + 
+  # geom_violin(draw_quantiles = 0.5, alpha = 0.5) +
+  geom_beeswarm(aes(color = type),
+                cex = 0.5, 
+                alpha = 0.5,
+                size = 1) +
+  geom_text(data = . %>% 
+              arrange(estimate) %>%
+              group_by(disease_system) %>% 
+              do({bind_rows(head(., 3),
+                            tail(., 3))}),
+            aes(label = gene_name)) +
+  scale_color_manual(values = overlap_type_pal) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 60, hjust = 1))
  
@@ -5124,6 +5527,1976 @@ disease_tis_cor %>%
            height = 16
            )
 
+
+```
+
+
+
+
+
+## Figure ? - Immunology
+
+###correlation between lymphoid tissues
+
+```{r}
+
+plot_data <- 
+  pig_atlas_tissue %>%
+  filter(tissue_name %in% c("lymph node", "spleen", "thymus", "tonsil")) %>%
+  
+  inner_join(gene_orthologs %>% 
+               select(1:2)) %>%
+  select(enssscg_id, ensg_id, tissue_name, ptpm) %>% 
+  left_join(human_atlas_tissue %>%
+              filter(tissue_name %in% c("lymph node", "spleen", "thymus", "tonsil")) %>%
+              select(1, 2, ptpm),
+            by = c("ensg_id", "tissue_name"),
+            suffix = c("_pig", "_human"))
+
+plot_data %>%
+  gather(species, ptpm, ptpm_pig, ptpm_human) %>%
+  mutate(id = paste(gsub("^ptpm_", "", species), tissue_name)) %>%
+  select(1, 2, id, ptpm) %>% 
+  spread(id, ptpm) %>%
+  select(-1, -2) %>%
+  cor(use = "pairwise.complete.obs", method = "spearman") %>% 
+  {.[which(grepl("human", rownames(.))), which(grepl("pig", rownames(.)))]} %>%
+  
+  
+  pheatmap(clustering_method = "average",
+           # cluster_rows = {dist(1 - .)} %>%
+           #   hclust(method = "average"),
+           # cluster_cols = t(.) %>%
+           #   {dist(1 - .)} %>%
+           #   hclust(method = "average"),
+           cluster_rows = F,
+           cluster_cols = F, 
+           border_color = "white", 
+           display_numbers = T,
+           legend = F,
+           filename = savepath("Lymphoid pig human spearman heatmap.pdf"),
+           width = 3.2, height = 3)
+
+
+lymph_panther <- 
+  read.delim("data/meta/PANTHER15.0_HMM_classifications", header = F) %>%
+  as_tibble() %>%
+  set_names(c("panther_id",
+              "name",
+              "molecular_function",
+              "biological_process",
+              "cellular_components",
+              "protein_class",
+              "Pathway")) %>%
+  filter(grepl("CATHELICIDIN|DEFENSIN|HEPCIDIN", name)) 
+
+# LEAP-2 = LIVER EXPRESSED ANTIMICROBIAL PEPTIDE 2 (LEAP2)
+# PGRP-S = PGLYRP1
+# NKL - only pig? 
+# gene_mapping %>%
+#   filter(display_name %in% c("LEAP2", "PGLYRP1", "NKL"))
+
+DEF_human <- 
+  human_gene_mapping %>%
+  select(ensg_id, gene_name) %>%
+  full_join(read_delim("data/meta/ensembl100_panther_families_human.txt", delim = "\t") %>%
+              set_colnames(c("ensg_id", "panther_id", "gene_name")) %>%
+              inner_join(lymph_panther[, 1:2]) ,
+            by = "gene_name",
+            suffix = c("","100")) %>%
+  filter(!is.na(ensg_id100)) %>%
+  filter(!grepl("SF", panther_id)) %>%
+  distinct() %>%
+  select(ensg_id, gene_name, panther_id, name) %>%
+  bind_rows(human_gene_mapping %>%
+              filter(gene_name %in% c("LEAP2", "PGLYRP1", "NKL")) %>%
+              mutate(panther_id = NA, 
+                     name = gene_name) %>%
+              select(ensg_id, gene_name, panther_id, name)) %>% 
+  distinct()
+
+DEF_pig <- 
+  gene_mapping %>%
+  select(enssscg_id, gene_name = display_name) %>%
+  full_join(read_delim("data/meta/ensembl100_panther_families_pig.txt", delim = "\t") %>%
+              set_colnames(c("enssscg_id", "gene_name", "panther_id")) %>%
+              inner_join(lymph_panther[, 1:2]) ,
+            by = c("enssscg_id"),
+            suffix = c("","100")) %>%
+  filter(!is.na(panther_id)) %>% 
+  
+  filter(!grepl("SF", panther_id)) %>%
+  distinct() %>%
+  select(enssscg_id, gene_name, panther_id, name) %>% 
+  bind_rows(gene_mapping %>%
+              filter(display_name %in% c("LEAP2", "PGLYRP1", "NKL")) %>%
+              mutate(panther_id = NA, 
+                     name = display_name) %>%
+              select(enssscg_id, gene_name = display_name, panther_id, name)) %>% 
+  distinct()
+
+
+DEF_joined <- 
+  full_join(right_join(gene_orthologs %>%
+                         select(1:2),
+                       DEF_human),
+            
+            right_join(gene_orthologs %>%
+                         select(1:2),
+                       DEF_pig),
+            
+            by = c("enssscg_id", "ensg_id", "panther_id", "name"),
+            suffix = c("_human", "_pig")) %>%
+  select(enssscg_id, ensg_id, gene_name_pig, gene_name_human, panther_id, name)
+
+plot_levels <- 
+  bind_rows(pig_atlas_comparison %>%
+              inner_join(DEF_joined) %>%
+              select(gene = enssscg_id, comparison_tissue, nx),
+            
+            human_atlas_comparison %>%
+              inner_join(DEF_joined) %>%
+              select(gene = ensg_id, comparison_tissue, nx)) %>%
+  spread(comparison_tissue, nx) %>% 
+  column_to_rownames("gene") %>% 
+  {log10(. + 1)} %>% 
+  t() %>%
+  dist() %>% 
+  hclust(method = "ward.D2") %>%
+  labels()
+
+
+
+pig_atlas_comparison %>%
+  inner_join(DEF_joined) %>%
+  mutate(comparison_tissue = factor(comparison_tissue, 
+                                    levels = plot_levels)) %>%
+  
+  mutate(gene_name = case_when((gene_name_pig == "NULL" | is.na(gene_name_pig) & 
+                                  is.na(gene_name_human)) ~ enssscg_id,
+                               !(gene_name_pig == "NULL" | is.na(gene_name_pig)) ~ gene_name_pig,
+                               T ~ gene_name_human)) %>%
+  
+  ggplot(aes(gene_name, comparison_tissue, fill = log10(nx + 1))) +
+  geom_tile() +
+  facet_grid(~name, scales = "free_x", space = "free",
+             labeller = label_wrap_gen()) +
+  scale_fill_viridis(option = "B", direction = -1) +
+  scale_x_discrete(expand = expansion(0)) +
+  stripped_theme_facet + 
+  theme(panel.spacing = unit(0.5, "mm"),
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.title = element_blank(),
+        strip.text.x = element_text(angle = 90), 
+        legend.position = "top") + 
+  ggtitle("Pig") +
+  
+  human_atlas_comparison %>%
+  inner_join(DEF_joined) %>%
+  mutate(comparison_tissue = factor(comparison_tissue, 
+                                    levels = plot_levels)) %>%
+  
+  mutate(gene_name = human_gene_mapping$gene_name[match(ensg_id, 
+                                                        human_gene_mapping$ensg_id)]) %>%
+  
+  ggplot(aes(gene_name, comparison_tissue, fill = log10(nx + 1))) +
+  geom_tile() +
+  facet_grid(~name, scales = "free_x", space = "free",
+             labeller = label_wrap_gen()) +
+  scale_fill_viridis(option = "B", direction = -1) +
+  scale_x_discrete(expand = expansion(0)) +
+  stripped_theme_facet + 
+  theme(panel.spacing = unit(0.5, "mm"),
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.title = element_blank(),
+        strip.text.x = element_text(angle = 90), 
+        legend.position = "top",
+        axis.text.y = element_blank()) + 
+  ggtitle("Human")
+  
+ggsave(savepath("HDP human pig expression heatmap.pdf"),
+       width = 10, height = 8)
+
+
+DEF_joined %>%
+  select(1:2) %>%
+  mutate(type = case_when(!is.na(enssscg_id) & !is.na(ensg_id) ~ "Overlap",
+                          !is.na(enssscg_id) ~ "Pig",
+                          !is.na(ensg_id) ~ "Human")) %>%
+  group_by(type) %>% 
+  count() %>%
+  ungroup() %>%
+  pie_plot(class_col = "type", y_col = "n", pal = overlap_type_pal)
+  
+ggsave(savepath("HDP overlap pie.pdf"),width = 4, height = 4)
+
+```
+
+
+####Overlap bipartite network
+
+```{r}
+
+n_conn <- 2
+
+plot_graph <- 
+  overlap_hyper_all %>% 
+  filter(adj_pval < 0.05) %>%
+  group_by(pig_id) %>% 
+  mutate(rank1 = rank(adj_pval)) %>%
+  group_by(human_id) %>% 
+  mutate(rank2 = rank(adj_pval)) %>% 
+  ungroup() %>% 
+  mutate(keep = rank1 <= n_conn |
+           rank2 <= n_conn) %>%
+  filter(keep) %>% 
+  mutate(weight = -log10(adj_pval) / m) %>%
+  arrange(-weight) %>%
+  mutate(pig_id = paste("pig", pig_id),
+         human_id = paste("human", human_id)) %>%
+  select(pig_id, human_id, weight) %>%
+  as_tbl_graph() %>%
+  mutate(species = str_to_sentence(str_extract(name, "pig|human")),
+         comparison_tissue = gsub("pig |human ", "", name)) %>%
+  left_join(tissue_mapping %>% 
+              select(comparison_tissue,
+                     organ_name) %>% 
+              distinct())
+
+plot_layout <- 
+  plot_graph %>% 
+  ggraph::create_layout(layout = "kk", 
+                        weight = 1 - .$weight) %>%
+  as_tibble()
+
+plot_graph %>% 
+  
+  ggraph(layout = "manual", x = plot_layout$x, y = plot_layout$y) +
+
+  geom_point(data = tibble(x = rep(range(plot_layout$x) * 1.2, 2),
+                           y = rep(range(plot_layout$y) * 1.2, each = 2)),
+             aes(x, y),
+             color = NA) +
+  
+  stat_density_2d(geom = "polygon", 
+                  aes(x, y, 
+                      fill = organ_name),
+                  inherit.aes = F,
+                  alpha = 0.5,
+                  bins = 3, 
+                  show.legend = F, 
+                  h = rep(1, 2)) +
+  
+  geom_edge_link(aes(alpha =  weight,
+                     width =  weight)) +
+  geom_node_point(aes(color = species),
+                  size = 5) +
+  
+  geom_node_text(aes(label = comparison_tissue),
+                 size = 2) +
+  
+  scale_edge_width_continuous(range = c(1, 3)) +
+  scale_color_manual(values = overlap_type_pal) +
+  scale_fill_manual(values = tissue_colors_palette_full) +
+  scale_x_continuous(expand = expansion(0)) +
+  scale_y_continuous(expand = expansion(0)) +
+  coord_flip() +
+  theme_stripped +
+  theme(axis.line = element_blank())
+
+ggsave(savepath("Classification overlap network.pdf"), width = 8, height = 8)
+
+```
+
+
+###TLR & IL
+
+```{r}
+
+TLR_genes <- 
+  read_csv("data/meta/pig_immunology_TLR_list.csv")  %>%
+  select(2) %>%
+  left_join(gene_orthologs,
+            by = c("Approved symbol" = "human_gene_name")) %>%
+  filter(!is.na(enssscg_id))
+
+IL_genes <-
+  read_csv("data/meta/pig_immunology_IL_list.csv") %>%
+  select(2) %>%
+  left_join(gene_orthologs,
+            by = c("Approved symbol" = "human_gene_name")) %>%
+  filter(!is.na(enssscg_id))
+
+
+
+# TLR
+
+plot_data <- 
+  joined_atlas_comparison %>% 
+  separate(mutual_id, into = c("enssscg_id", "ensg_id")) %>% 
+  inner_join(TLR_genes) %>%
+  group_by(enssscg_id, species) %>% 
+  mutate(max_tmm = max(mutual_tmm, na.rm = T),
+         mutual_tmm1 = mutual_tmm,
+         mutual_tmm = ifelse(max_tmm == 0, 0, mutual_tmm / max_tmm)) %>%
+  left_join(human_gene_mapping) 
+
+plot_data_frac <- 
+  plot_data %>%
+  select(comparison_tissue, species, ptpm, gene_name, enssscg_id) %>%
+  group_by(comparison_tissue, species) %>%
+  mutate(frac = 100 * ptpm / sum(ptpm),
+         label = ifelse(frac >= 10, paste0(round(frac, 1), "%"), NA)) %>%
+  
+  left_join(select(., -label, -ptpm) %>% 
+              spread(species, frac) %>%
+              group_by(comparison_tissue) %>%
+              summarise(cor = cor(human, pig, method = "spearman")) %>%
+              select(comparison_tissue, cor)) %>%
+  ungroup() %>%
+  arrange(cor) %>% 
+  mutate(comparison_tissue = factor(comparison_tissue, unique(comparison_tissue)),
+         species = factor(species, c("human", "pig"))) 
+
+plot_data_frac %>%
+  
+  
+  {ggplot(., aes(as.numeric(species), frac, fill = gene_name, label = label)) +
+      geom_col(color = "white",
+               size = 0.3,
+               width = 0.55) +
+      geom_area(aes(scales::rescale(as.numeric(species), c(1.25, 1.75))),
+                size = 0.3,
+                color = "white",
+                alpha = 1) +
+      geom_text(size = 2,
+                position = position_stack(vjust = 0.5), color = "white") +
+      facet_wrap(~comparison_tissue, nrow = 4, scales = "free_x") +
+      scale_x_discrete(labels = levels(.$species),
+                       limits=c("1","2"),
+                       expand = expansion(0)) +
+      scale_y_continuous(expand = expansion(c(0, 0.05))) +
+      scale_fill_manual(values = colorRampPalette(ggthemes::tableau_color_pal(palette = "Hue Circle", 
+                                                                              type = c("regular"), 
+                                                                              direction = 1)(19))(n_distinct(plot_data$gene_name))) + 
+      # directlabels::geom_dl(aes(label = label), list("top.points", cex = .6)) +
+      stripped_theme_facet +
+      ylab("Fraction of expression") +
+      theme(panel.border = element_blank(),
+            axis.title.x = element_blank())}
+ggsave(savepath("TLR species fraction bar.pdf"), width = 10, height = 7)
+
+plot_data_frac %>%
+  unite(id, comparison_tissue, species) %>%
+  select(id, frac, gene_name) %>% 
+  spread(id, frac) %>% 
+  column_to_rownames("gene_name") %>% 
+  pheatmap(clustering_method = "ward.D2",
+           border_color = NA,
+           annotation_col = colnames(.) %>% 
+             enframe() %>%
+             separate(value, into = c("Tissue", "Species"), sep = "_", remove = F) %>% 
+             mutate(Species = str_to_sentence(Species)) %>%
+             select(-name, -Tissue) %>% 
+             column_to_rownames("value"),
+           annotation_colors = list(Species = overlap_type_pal[c(1,3)]),
+           filename = savepath("TLR frac heatmap.pdf"),
+           width = 10, 
+           height = 4)
+
+plot_data %>%
+  ungroup() %>%
+  filter(!comparison_tissue %in% c( "bone marrow", "retina")) %>%
+  unite(id, comparison_tissue, species) %>%
+  select(id, mutual_tmm1, gene_name) %>% 
+  mutate(mutual_tmm1 = ifelse(mutual_tmm1 < 1, 0 , mutual_tmm1)) %>%
+  spread(id, mutual_tmm1) %>% 
+  column_to_rownames("gene_name") %>% 
+  {log10(. + 1)} %>%
+  pheatmap(clustering_method = "ward.D2",
+           border_color = NA,
+           annotation_col = colnames(.) %>% 
+             enframe() %>%
+             separate(value, into = c("Tissue", "Species"), sep = "_", remove = F) %>% 
+             mutate(Species = str_to_sentence(Species)) %>%
+             select(-name, -Tissue) %>% 
+             column_to_rownames("value"),
+           annotation_colors = list(Species = overlap_type_pal[c(1,3)]),
+           filename = savepath("TLR log tmm heatmap.pdf"),
+           width = 10, 
+           height = 8)
+
+plot_data %>% 
+  group_by(comparison_tissue, species) %>% 
+  summarise(expression = sum(mutual_tmm1)) %>%
+  {ggplot(., aes(species, expression)) +
+      geom_violin(draw_quantiles = 0.5) +
+      geom_path(aes(group = comparison_tissue), 
+                alpha = 0.2) +
+      geom_point(aes(color = comparison_tissue),
+                 show.legend = F) +
+      group_by(., comparison_tissue) %>%
+      top_n(1, expression) %>%
+      geom_text(data = ., 
+                aes(label = comparison_tissue),
+                vjust = 0,
+                hjust = ifelse(.$species == "human",
+                               1, 0),
+                size = 2) +
+      scale_color_manual(values = tissue_colors_palette_comparison) + 
+      stripped_theme}
+ggsave(savepath("TLR violin.pdf"), 
+       width = 4, height = 5)
+
+
+plot_data2 <-
+  gene_overlap_data_summarized %>%
+  inner_join(TLR_genes) 
+
+plot_data3 <-
+  human_pig_gene_class_comparison %>% 
+  inner_join(plot_data %>% 
+               select(enssscg_id, ensg_id) %>% 
+               distinct()) %>%
+  select(enssscg_id, ensg_id, spec_category_pig, spec_category_human) %>%
+  left_join(human_gene_mapping) %>%
+  gather(species, spec_category, spec_category_pig, spec_category_human) %>%
+  mutate(species = str_to_sentence(gsub("spec_category_", "", species))) %>%
+  left_join(TLR_genes)
+
+
+#####
+
+
+cluster_data <-
+  plot_data %>%
+  ungroup() %>%
+  select(comparison_tissue, species, mutual_tmm, gene_name) %>%
+  group_by(gene_name, comparison_tissue) %>%
+  summarise(mutual_tmm = mean(mutual_tmm)) %>%
+  spread(gene_name, mutual_tmm) %>%
+  column_to_rownames("comparison_tissue")
+
+
+tis_cluster <- 
+  cluster_data %>%
+  dist() %>% 
+  hclust(method = "ward.D2")
+
+tis_order <- 
+  tis_cluster$labels[tis_cluster$order]
+
+gene_order <- 
+  plot_data %>% 
+  ungroup() %>%
+  select(comparison_tissue, species, mutual_tmm, gene_name) %>%
+  spread(species, mutual_tmm) %>%
+  group_by(gene_name) %>% 
+  summarise(dist = sqrt(sum((human - pig) ^ 2))) %>% 
+  arrange(dist) %>% 
+  pull(gene_name)
+  
+  
+
+
+# Plot:
+
+
+plot_data %>% 
+  ungroup() %>%
+  select(gene_name, species) %>% 
+  distinct() %>%
+  mutate(species = toupper(substr(species, 1, 1))) %>%
+  mutate(gene_name = factor(gene_name, gene_order)) %>%
+  
+  
+  ggplot(aes(1, gene_name, group = species, fill = species, label = species)) +
+  geom_tile(show.legend = F, 
+            position = "dodge", 
+            height = 0.9) +
+  geom_text(position = position_dodge(width = 1), 
+            size = 2, 
+            fontface = "bold",
+            color = "white") +
+  scale_fill_manual(values = c("H" = "#DB1F48",
+                               "P" = "#01949A")) +
+  # scale_x_discrete(limits = "Species") +
+  theme_void() +
+  theme(plot.margin = unit(c(0,0,0,0), "mm"),
+        axis.text.x = element_blank()) +
+  
+  # Specificity
+  plot_data3 %>%
+  mutate(gene_name = factor(gene_name, gene_order)) %>%
+  
+  ggplot(aes(1, gene_name, group = species, fill = spec_category, label = species)) +
+  geom_tile(show.legend = F,
+            position = "dodge", 
+            height = 0.9, width = 1) +
+  # geom_text(position = position_dodge(width = 1), 
+  #           size = 2, 
+  #           fontface = "bold",
+  #           color = "white") +
+  scale_fill_manual(values = gene_category_pal) +
+  # scale_x_discrete(limits = "Specificity") +
+  theme_void() +
+  theme(plot.margin = unit(c(0,0,0,0), "mm"),
+        axis.text.y = element_blank()) +
+  
+  
+  # Overlap
+  plot_data2 %>%
+  mutate(gene_name = factor(gene_name, gene_order)) %>%
+  
+  ggplot(aes(1, gene_name, fill = type)) +
+  geom_tile(show.legend = F,
+            height = 0.9) +
+  scale_fill_manual(values = overlap_type_pal) +
+  # scale_x_discrete(limits = "Overlap") +
+  theme_void() +
+  theme(axis.text.x = element_blank()) + 
+  
+  # Heatmap
+  plot_data %>% 
+  ungroup() %>%
+  mutate(gene_name = factor(gene_name, gene_order),
+         comparison_tissue = factor(comparison_tissue, tis_order)) %>%
+  
+  ggplot(aes(gene_name, comparison_tissue, group = species, fill = mutual_tmm)) +
+  geom_tile(position= "dodge", width = 0.9) +
+  coord_flip() +
+  scale_fill_viridis_c(option = "B", direction = -1, name = "Expression") +
+  # facet_grid(ensg_id ~ .) + 
+  # facet_wrap(~gene_name, ncol = 1, strip.position = "left") + 
+  stripped_theme_facet +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        strip.placement = "outside",
+        strip.text.y.left = element_text(angle = 0),
+        panel.spacing = unit(0, "mm"),
+        legend.position = "right",
+        panel.border = element_rect(fill = NA, color = "white"),
+        axis.title = element_blank(), 
+        axis.line = element_blank()) +
+  theme(plot.margin = unit(c(0,0,0,0), "mm")) +
+  
+  
+  
+  plot_layout(widths = c(0.025, 0.025, 0.025, 1), nrow = 1)
+
+ggsave(savepath("Fig7 TLR heatmap.pdf"),
+       width = 6, height = 2 + 0.15 * n_distinct(plot_data$ensg_id))
+
+
+
+
+
+
+
+# IL
+
+plot_data <- 
+  joined_atlas_comparison %>% 
+  separate(mutual_id, into = c("enssscg_id", "ensg_id")) %>% 
+  inner_join(IL_genes) %>%
+  group_by(enssscg_id, species) %>% 
+  mutate(max_tmm = max(mutual_tmm, na.rm = T),
+         mutual_tmm1 = mutual_tmm,
+         mutual_tmm = ifelse(max_tmm == 0, 0, mutual_tmm / max_tmm)) %>%
+  left_join(human_gene_mapping) 
+
+plot_data_frac <- 
+  plot_data %>%
+  select(comparison_tissue, species, ptpm, gene_name, enssscg_id) %>%
+  group_by(comparison_tissue, species) %>%
+  mutate(frac = 100 * ptpm / sum(ptpm, na.rm = T),
+         label = ifelse(frac >= 10, paste0(gene_name, "\n", round(frac, 1), "%"), NA)) %>%
+  
+  left_join(select(., -label, -ptpm) %>% 
+              spread(species, frac) %>%
+              group_by(comparison_tissue) %>%
+              summarise(cor = cor(human, pig, method = "spearman")) %>%
+              select(comparison_tissue, cor)) %>%
+  ungroup() %>%
+  arrange(cor) %>% 
+  mutate(comparison_tissue = factor(comparison_tissue, unique(comparison_tissue)),
+         species = factor(species, c("human", "pig"))) 
+
+plot_data_frac %>%
+  
+  
+  {ggplot(., aes(as.numeric(species), frac, fill = gene_name, label = label)) +
+      geom_col(color = "white",
+               size = 0.3,
+               width = 0.55) +
+      geom_area(aes(scales::rescale(as.numeric(species), c(1.25, 1.75))),
+                size = 0.3,
+                color = "white",
+                alpha = 1) +
+      geom_text(size = 2,
+                position = position_stack(vjust = 0.5), color = "white") +
+      facet_wrap(~comparison_tissue, nrow = 4, scales = "free_x") +
+      scale_x_discrete(labels = levels(.$species),
+                       limits=c("1","2"),
+                       expand = expansion(0)) +
+      scale_y_continuous(expand = expansion(c(0, 0.05))) +
+      scale_fill_manual(values = colorRampPalette(ggthemes::tableau_color_pal(palette = "Hue Circle", 
+                                                                              type = c("regular"), 
+                                                                              direction = 1)(19))(n_distinct(plot_data$gene_name))) + 
+      # directlabels::geom_dl(aes(label = label), list("top.points", cex = .6)) +
+      stripped_theme_facet +
+      ylab("Fraction of expression") +
+      theme(panel.border = element_blank(),
+            axis.title.x = element_blank())}
+ggsave(savepath("IL species fraction bar.pdf"), width = 10, height = 7)
+
+plot_data_frac %>%
+  unite(id, comparison_tissue, species) %>%
+  select(id, frac, gene_name) %>% 
+  spread(id, frac) %>% 
+  column_to_rownames("gene_name") %>% 
+  pheatmap(clustering_method = "ward.D2",
+           border_color = NA,
+           annotation_col = colnames(.) %>% 
+             enframe() %>%
+             separate(value, into = c("Tissue", "Species"), sep = "_", remove = F) %>% 
+             mutate(Species = str_to_sentence(Species)) %>%
+             select(-name, -Tissue) %>% 
+             column_to_rownames("value"),
+           annotation_colors = list(Species = overlap_type_pal[c(1,3)]),
+           filename = savepath("IL frac heatmap.pdf"),
+           width = 10, 
+           height = 8)
+
+plot_data %>%
+  ungroup() %>%
+  filter(!comparison_tissue %in% c( "bone marrow", "retina")) %>%
+  unite(id, comparison_tissue, species) %>%
+  select(id, mutual_tmm1, gene_name) %>% 
+  mutate(mutual_tmm1 = ifelse(mutual_tmm1 < 1, 0 , mutual_tmm1)) %>%
+  spread(id, mutual_tmm1) %>% 
+  column_to_rownames("gene_name") %>% 
+  {log10(. + 1)} %>%
+  pheatmap(clustering_method = "ward.D2",
+           border_color = NA,
+           annotation_col = colnames(.) %>% 
+             enframe() %>%
+             separate(value, into = c("Tissue", "Species"), sep = "_", remove = F) %>% 
+             mutate(Species = str_to_sentence(Species)) %>%
+             select(-name, -Tissue) %>% 
+             column_to_rownames("value"),
+           annotation_colors = list(Species = overlap_type_pal[c(1,3)]),
+           filename = savepath("IL log tmm heatmap.pdf"),
+           width = 10, 
+           height = 8)
+
+plot_data %>% 
+  group_by(comparison_tissue, species) %>% 
+  summarise(expression = sum(mutual_tmm1)) %>%
+  {ggplot(., aes(species, expression)) +
+      geom_violin(draw_quantiles = 0.5) +
+      geom_path(aes(group = comparison_tissue), 
+                alpha = 0.2) +
+      geom_point(aes(color = comparison_tissue),
+                 show.legend = F) +
+      group_by(., comparison_tissue) %>%
+      top_n(1, expression) %>%
+      geom_text(data = ., 
+                aes(label = comparison_tissue),
+                vjust = 0,
+                hjust = ifelse(.$species == "human",
+                               1, 0),
+                size = 2) +
+      scale_color_manual(values = tissue_colors_palette_comparison) + 
+      stripped_theme}
+ggsave(savepath("IL violin.pdf"), 
+       width = 4, height = 10)
+
+plot_data2 <-
+  gene_overlap_data_summarized %>%
+  inner_join(IL_genes) 
+
+plot_data3 <-
+  human_pig_gene_class_comparison %>% 
+  inner_join(plot_data %>% 
+               select(enssscg_id, ensg_id) %>% 
+               distinct()) %>%
+  select(enssscg_id, ensg_id, spec_category_pig, spec_category_human) %>%
+  left_join(human_gene_mapping) %>%
+  gather(species, spec_category, spec_category_pig, spec_category_human) %>%
+  mutate(species = str_to_sentence(gsub("spec_category_", "", species))) %>%
+  left_join(IL_genes)
+
+
+#####
+
+
+cluster_data <-
+  plot_data %>%
+  ungroup() %>%
+  select(comparison_tissue, species, mutual_tmm, gene_name) %>%
+  group_by(gene_name, comparison_tissue) %>%
+  summarise(mutual_tmm = mean(mutual_tmm)) %>%
+  spread(gene_name, mutual_tmm) %>%
+  column_to_rownames("comparison_tissue")
+
+
+tis_cluster <- 
+  cluster_data %>%
+  dist() %>% 
+  hclust(method = "ward.D2")
+
+tis_order <- 
+  tis_cluster$labels[tis_cluster$order]
+
+gene_order <- 
+  plot_data %>% 
+  ungroup() %>%
+  select(comparison_tissue, species, mutual_tmm, gene_name) %>%
+  spread(species, mutual_tmm) %>%
+  group_by(gene_name) %>% 
+  summarise(dist = sqrt(sum((human - pig) ^ 2))) %>% 
+  arrange(dist) %>% 
+  pull(gene_name)
+  
+  
+
+
+# Plot:
+
+
+plot_data %>% 
+  ungroup() %>%
+  select(gene_name, species) %>% 
+  distinct() %>%
+  mutate(species = toupper(substr(species, 1, 1))) %>%
+  mutate(gene_name = factor(gene_name, gene_order)) %>%
+  
+  
+  ggplot(aes(1, gene_name, group = species, fill = species, label = species)) +
+  geom_tile(show.legend = F, 
+            position = "dodge", 
+            height = 0.9) +
+  geom_text(position = position_dodge(width = 1), 
+            size = 2, 
+            fontface = "bold",
+            color = "white") +
+  scale_fill_manual(values = c("H" = "#DB1F48",
+                               "P" = "#01949A")) +
+  # scale_x_discrete(limits = "Species") +
+  theme_void() +
+  theme(plot.margin = unit(c(0,0,0,0), "mm"),
+        axis.text.x = element_blank()) +
+  
+  # Specificity
+  plot_data3 %>%
+  mutate(gene_name = factor(gene_name, gene_order)) %>%
+  
+  ggplot(aes(1, gene_name, group = species, fill = spec_category, label = species)) +
+  geom_tile(show.legend = F,
+            position = "dodge", 
+            height = 0.9, width = 1) +
+  # geom_text(position = position_dodge(width = 1), 
+  #           size = 2, 
+  #           fontface = "bold",
+  #           color = "white") +
+  scale_fill_manual(values = gene_category_pal) +
+  # scale_x_discrete(limits = "Specificity") +
+  theme_void() +
+  theme(plot.margin = unit(c(0,0,0,0), "mm"),
+        axis.text.y = element_blank()) +
+  
+  
+  # Overlap
+  plot_data2 %>%
+  mutate(gene_name = factor(gene_name, gene_order)) %>%
+  
+  ggplot(aes(1, gene_name, fill = type)) +
+  geom_tile(show.legend = F,
+            height = 0.9) +
+  scale_fill_manual(values = overlap_type_pal) +
+  # scale_x_discrete(limits = "Overlap") +
+  theme_void() +
+  theme(axis.text.x = element_blank()) + 
+  
+  # Heatmap
+  plot_data %>% 
+  ungroup() %>%
+  mutate(gene_name = factor(gene_name, gene_order),
+         comparison_tissue = factor(comparison_tissue, tis_order)) %>%
+  
+  ggplot(aes(gene_name, comparison_tissue, group = species, fill = mutual_tmm)) +
+  geom_tile(position= "dodge", width = 0.9) +
+  coord_flip() +
+  scale_fill_viridis_c(option = "B", direction = -1, name = "Expression") +
+  # facet_grid(ensg_id ~ .) + 
+  # facet_wrap(~gene_name, ncol = 1, strip.position = "left") + 
+  stripped_theme_facet +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        strip.placement = "outside",
+        strip.text.y.left = element_text(angle = 0),
+        panel.spacing = unit(0, "mm"),
+        legend.position = "right",
+        panel.border = element_rect(fill = NA, color = "white"),
+        axis.title = element_blank(), 
+        axis.line = element_blank()) +
+  theme(plot.margin = unit(c(0,0,0,0), "mm")) +
+  
+  
+  
+  plot_layout(widths = c(0.025, 0.025, 0.025, 1), nrow = 1)
+
+ggsave(savepath("Fig7 IL heatmap.pdf"),
+       width = 6, height = 2 + 0.15 * n_distinct(plot_data$ensg_id))
+
+
+
+```
+
+### Blood cell composition
+
+```{r}
+
+
+
+# selected markers
+
+selected_blood_markers <- 
+  readxl::read_excel("data/meta/High sensitivity immune cell markers.xlsx") %>%
+  select(gene_name = 2, 
+         cell_type = 3) %>%
+  inner_join(human_gene_mapping %>% 
+               select(gene_name, ensg_id)) 
+  
+
+plot_data <- 
+  selected_blood_markers %>%
+  inner_join(gene_orthologs) %>%
+  inner_join(joined_atlas_comparison %>% 
+               filter(!comparison_tissue %in% c("bone marrow", "retina")) %>%
+               select(mutual_id, comparison_tissue, species, mutual_tmm) %>%
+               separate(mutual_id, into = c("enssscg_id", "ensg_id"))) %>%
+  group_by(ensg_id, species, cell_type) %>% 
+  mutate(frac = mutual_tmm / sum(mutual_tmm, na.rm = T)) 
+
+plot_data %>%
+  ggplot(aes(frac, comparison_tissue, fill = species)) +
+  geom_boxplot() +
+  facet_wrap(~cell_type, scales = "free")
+  
+
+plot_data %>%
+  group_by(cell_type, comparison_tissue, species) %>% 
+  summarise(frac = mean(frac, na.rm = T)) %>%
+  ungroup() %>%
+  left_join(tissue_mapping %>% 
+              select(comparison_tissue, organ_name) %>% 
+              distinct()) %>%
+  arrange(organ_name) %>%
+  mutate(frac = frac * 100,
+         label = ifelse(frac >= 10, 
+                        paste0(comparison_tissue, "\n", 
+                               round(frac, 1), "%"),
+                        NA),
+         species = factor(species, c("human", "pig")),
+         comparison_tissue = factor(comparison_tissue, unique(comparison_tissue))) %>% 
+  
+  
+  {ggplot(., aes(as.numeric(species), frac, fill = comparison_tissue, label = label)) +
+      geom_col(color = "white",
+               size = 0.3,
+               width = 0.55) +
+      geom_area(aes(scales::rescale(as.numeric(species), c(1.25, 1.75))),
+                size = 0.3,
+                color = "white",
+                alpha = 1) +
+      geom_text(size = 2,
+                position = position_stack(vjust = 0.5), color = "white") +
+      facet_wrap(~cell_type, nrow = 4, scales = "free_x") +
+      scale_x_discrete(labels = levels(.$species),
+                       limits=c("1","2"),
+                       expand = expansion(0)) +
+      scale_y_continuous(expand = expansion(c(0, 0.05))) +
+      # scale_fill_manual(values = colorRampPalette(ggthemes::tableau_color_pal(palette = "Hue Circle", 
+      #                                                                         type = c("regular"), 
+      #                                                                         direction = 1)(19))(n_distinct(plot_data$comparison_tissue))) + 
+      scale_fill_manual(values = tissue_colors_palette_comparison) +
+      # directlabels::geom_dl(aes(label = label), list("top.points", cex = .6)) +
+      stripped_theme_facet +
+      ylab("Fraction of expression") +
+      theme(panel.border = element_blank(),
+            axis.title.x = element_blank())}
+ggsave(savepath("blood decomposition selected markers bar.pdf"),
+       width = 12, height = 10)
+
+
+
+
+tibble(gene = rep(c("GENE1", "GENE2"), 2),
+       species = rep(c("human", "pig"), each = 2),
+       frac = c(0.7, 0.3, 0.1, 0.9)) %>%
+  mutate(species = factor(species)) %>%
+   
+                  
+  {ggplot(., aes(as.numeric(species), frac, fill = gene, label = gene)) +
+      geom_col(color = "white",
+               size = 0.3,
+               width = 0.55,
+               show.legend = F) +
+      geom_area(aes(scales::rescale(as.numeric(species), c(1.25, 1.75))),
+                size = 0.3,
+                color = "white",
+                alpha = 1,
+                show.legend = F) +
+      geom_text(data = . %>%
+                  mutate(y = scales::rescale(unclass(factor(gene)), c(1,0))) %>%
+                  select(gene, y) %>% 
+                  distinct() %>% 
+                  arrange(y), 
+                aes(x = 1.5, y = y),
+                size = 3,
+                vjust = c(-1, 2),
+                # position = position_stack(vjust = 0.5), 
+                color = "white") +
+      scale_x_discrete(labels = levels(.$species),
+                       limits=c("1","2"),
+                       expand = expansion(0)) +
+      scale_y_continuous(expand = expansion(c(0, 0.05))) +
+      scale_fill_manual(values = c("gray50", "gray20")) +
+      ylab("Fraction of expression") +
+      theme(panel.border = element_blank(),
+            axis.title.x = element_blank(),
+            panel.grid = element_blank(),
+            panel.background = element_blank())}
+ggsave(savepath("Gen ratio example plot.pdf"), width = 2, height = 3)
+
+# Lymphoid tissues - selected markers
+plot_data1 <- 
+  gene_orthologs %>%
+  select(1:2, 4) %>% 
+  left_join(pig_atlas_tissue %>% 
+              filter(tissue_name %in% c("lymph node",
+                                        "spleen",
+                                        "thymus",
+                                        "tonsil")) %>% 
+              select(enssscg_id, tissue_name, pig = ptpm)) %>% 
+  left_join(human_atlas_tissue %>% 
+              filter(tissue_name %in% c("lymph node",
+                                        "spleen",
+                                        "thymus",
+                                        "tonsil")) %>% 
+              select(ensg_id, tissue_name, human = ptpm), 
+            by = c("ensg_id", "tissue_name")) %>%
+  gather(species, ptpm, human, pig) 
+            
+
+plot_data <- 
+  selected_blood_markers %>%
+  inner_join(gene_orthologs) %>%
+  inner_join(plot_data1) %>%
+  group_by(ensg_id, species, cell_type) %>% 
+  mutate(frac = ptpm / sum(ptpm, na.rm = T)) 
+
+plot_data %>%
+  ggplot(aes(frac, tissue_name, fill = species)) +
+  geom_boxplot() +
+  facet_wrap(~cell_type, scales = "free")
+  
+
+plot_data %>%
+  group_by(cell_type, tissue_name, species) %>% 
+  summarise(frac = mean(frac, na.rm = T)) %>%
+  ungroup() %>%
+  left_join(tissue_mapping %>% 
+              select(tissue_name, organ_name) %>% 
+              distinct()) %>%
+  arrange(organ_name) %>%
+  mutate(frac = frac * 100,
+         label = ifelse(frac >= 10, 
+                        paste0(tissue_name, "\n", 
+                               round(frac, 1), "%"),
+                        NA),
+         species = factor(species, c("human", "pig")),
+         tissue_name = factor(tissue_name, unique(tissue_name))) %>% 
+  
+  
+  {ggplot(., aes(as.numeric(species), frac, fill = tissue_name, label = label)) +
+      geom_col(color = "white",
+               size = 0.3,
+               width = 0.55) +
+      geom_area(aes(scales::rescale(as.numeric(species), c(1.25, 1.75))),
+                size = 0.3,
+                color = "white",
+                alpha = 1) +
+      geom_text(size = 2,
+                position = position_stack(vjust = 0.5), color = "white") +
+      facet_wrap(~cell_type, nrow = 4, scales = "free_x") +
+      scale_x_discrete(labels = levels(.$species),
+                       limits=c("1","2"),
+                       expand = expansion(0)) +
+      scale_y_continuous(expand = expansion(c(0, 0.05))) +
+      # scale_fill_manual(values = colorRampPalette(ggthemes::tableau_color_pal(palette = "Hue Circle",
+      #                                                                         type = c("regular"),
+      #                                                                         direction = 1)(19))(n_distinct(plot_data$tissue_name))) +
+      scale_fill_manual(values = prismatic::color(colorRampPalette(c("black", "#A1A8AA", "white"))(9)[2:6])) +
+      # directlabels::geom_dl(aes(label = label), list("top.points", cex = .6)) +
+      stripped_theme_facet +
+      ylab("Fraction of expression") +
+      theme(panel.border = element_blank(),
+            axis.title.x = element_blank())}
+ggsave(savepath("blood decomposition selected markers lymphoid bar.pdf"),
+       width = 12, height = 10)
+
+
+
+# cell enriched - blood cell
+plot_data <- 
+  human_gene_class_blood %>%
+  filter(specificity_category %in% c("Tissue enriched")) %>%
+  select(ensg_id, enhanced_tissues, ts_score) %>% 
+  left_join(human_gene_class %>%
+              select(ensg_id, enhanced_tissues),
+            by = "ensg_id",
+            suffix = c("", "_tissue")) %>% 
+  separate_rows(enhanced_tissues_tissue, sep = ";") %>%
+  mutate(blood = enhanced_tissues_tissue %in% c("blood", "lymphoid tissue", "bone marrow")) %>%
+  group_by(ensg_id) %>% 
+  mutate(only_blood = all(blood)) %>%
+  ungroup() %>% 
+  filter(only_blood) %>%
+  select(1:3) %>%
+  distinct() %>%
+  inner_join(gene_orthologs) %>%
+  inner_join(joined_atlas_comparison %>% 
+               filter(!comparison_tissue %in% c("bone marrow", "retina")) %>%
+               select(mutual_id, comparison_tissue, species, mutual_tmm) %>%
+               separate(mutual_id, into = c("enssscg_id", "ensg_id"))) %>%
+  group_by(ensg_id, species, enhanced_tissues) %>% 
+  mutate(frac = mutual_tmm / sum(mutual_tmm, na.rm = T)) 
+
+plot_data %>%
+  ggplot(aes(frac, comparison_tissue, fill = species)) +
+  geom_boxplot() +
+  facet_wrap(~enhanced_tissues, scales = "free")
+  
+
+plot_data %>%
+  group_by(enhanced_tissues, comparison_tissue, species) %>% 
+  summarise(frac = mean(frac, na.rm = T)) %>%
+  ungroup() %>%
+  left_join(tissue_mapping %>% 
+              select(comparison_tissue, organ_name) %>% 
+              distinct()) %>%
+  arrange(organ_name) %>%
+  mutate(frac = frac * 100,
+         label = ifelse(frac >= 10, 
+                        paste0(comparison_tissue, "\n", 
+                               round(frac, 1), "%"),
+                        NA),
+         species = factor(species, c("human", "pig")),
+         comparison_tissue = factor(comparison_tissue, unique(comparison_tissue))) %>% 
+  
+  
+  {ggplot(., aes(as.numeric(species), frac, fill = comparison_tissue, label = label)) +
+      geom_col(color = "white",
+               size = 0.3,
+               width = 0.55) +
+      geom_area(aes(scales::rescale(as.numeric(species), c(1.25, 1.75))),
+                size = 0.3,
+                color = "white",
+                alpha = 1) +
+      geom_text(size = 2,
+                position = position_stack(vjust = 0.5), color = "white") +
+      facet_wrap(~enhanced_tissues, nrow = 4, scales = "free_x") +
+      scale_x_discrete(labels = levels(.$species),
+                       limits=c("1","2"),
+                       expand = expansion(0)) +
+      scale_y_continuous(expand = expansion(c(0, 0.05))) +
+      # scale_fill_manual(values = colorRampPalette(ggthemes::tableau_color_pal(palette = "Hue Circle", 
+      #                                                                         type = c("regular"), 
+      #                                                                         direction = 1)(19))(n_distinct(plot_data$comparison_tissue))) + 
+      scale_fill_manual(values = tissue_colors_palette_comparison) +
+      # directlabels::geom_dl(aes(label = label), list("top.points", cex = .6)) +
+      stripped_theme_facet +
+      ylab("Fraction of expression") +
+      theme(panel.border = element_blank(),
+            axis.title.x = element_blank())}
+ggsave(savepath("blood decomposition cell enriched comparison bar.pdf"),
+       width = 12, height = 10)
+
+
+# cell or group enriched - blood cell
+plot_data <- 
+  human_gene_class_blood %>%
+  filter(specificity_category %in% c("Tissue enriched", "Group enriched")) %>%
+  select(ensg_id, enhanced_tissues, ts_score) %>% 
+  separate_rows(enhanced_tissues, sep = ",") %>%
+  left_join(human_gene_class %>%
+              select(ensg_id, enhanced_tissues),
+            by = "ensg_id",
+            suffix = c("", "_tissue")) %>% 
+  separate_rows(enhanced_tissues_tissue, sep = ";") %>%
+  mutate(blood = enhanced_tissues_tissue %in% c("blood", "lymphoid tissue", "bone marrow")) %>%
+  group_by(ensg_id) %>% 
+  mutate(only_blood = all(blood)) %>%
+  ungroup() %>% 
+  filter(only_blood) %>%
+  select(1:3) %>%
+  distinct() %>%
+  inner_join(gene_orthologs) %>%
+  inner_join(joined_atlas_comparison %>% 
+               filter(!comparison_tissue %in% c("bone marrow", "retina")) %>%
+               select(mutual_id, comparison_tissue, species, mutual_tmm) %>%
+               separate(mutual_id, into = c("enssscg_id", "ensg_id"))) %>%
+  group_by(ensg_id, species, enhanced_tissues) %>% 
+  mutate(frac = mutual_tmm / sum(mutual_tmm, na.rm = T)) 
+
+plot_data %>%
+  ggplot(aes(frac, comparison_tissue, fill = species)) +
+  geom_boxplot() +
+  facet_wrap(~enhanced_tissues, scales = "free")
+  
+
+plot_data %>%
+  group_by(enhanced_tissues, comparison_tissue, species) %>% 
+  summarise(frac = mean(frac, na.rm = T)) %>%
+  ungroup() %>%
+  left_join(tissue_mapping %>% 
+              select(comparison_tissue, organ_name) %>% 
+              distinct()) %>%
+  arrange(organ_name) %>%
+  mutate(frac = frac * 100,
+         label = ifelse(frac >= 10, 
+                        paste0(comparison_tissue, "\n", 
+                               round(frac, 1), "%"),
+                        NA),
+         species = factor(species, c("human", "pig")),
+         comparison_tissue = factor(comparison_tissue, unique(comparison_tissue))) %>% 
+  
+  
+  {ggplot(., aes(as.numeric(species), frac, fill = comparison_tissue, label = label)) +
+      geom_col(color = "white",
+               size = 0.3,
+               width = 0.55) +
+      geom_area(aes(scales::rescale(as.numeric(species), c(1.25, 1.75))),
+                size = 0.3,
+                color = "white",
+                alpha = 1) +
+      geom_text(size = 2,
+                position = position_stack(vjust = 0.5), color = "white") +
+      facet_wrap(~enhanced_tissues, nrow = 4, scales = "free_x") +
+      scale_x_discrete(labels = levels(.$species),
+                       limits=c("1","2"),
+                       expand = expansion(0)) +
+      scale_y_continuous(expand = expansion(c(0, 0.05))) +
+      # scale_fill_manual(values = colorRampPalette(ggthemes::tableau_color_pal(palette = "Hue Circle", 
+      #                                                                         type = c("regular"), 
+      #                                                                         direction = 1)(19))(n_distinct(plot_data$comparison_tissue))) + 
+      scale_fill_manual(values = tissue_colors_palette_comparison) +
+      # directlabels::geom_dl(aes(label = label), list("top.points", cex = .6)) +
+      stripped_theme_facet +
+      ylab("Fraction of expression") +
+      theme(panel.border = element_blank(),
+            axis.title.x = element_blank())}
+ggsave(savepath("blood decomposition cell or group enriched comparison bar.pdf"),
+       width = 12, height = 10)
+
+# cell enriched - blood lineage
+plot_data <- 
+  human_gene_class_bloodlineage %>%
+  filter(specificity_category %in% c("Tissue enriched")) %>%
+  select(ensg_id, enhanced_tissues, ts_score) %>% 
+  left_join(human_gene_class %>%
+              select(ensg_id, enhanced_tissues),
+            by = "ensg_id",
+            suffix = c("", "_tissue")) %>% 
+  separate_rows(enhanced_tissues_tissue, sep = ";") %>%
+  mutate(blood = enhanced_tissues_tissue %in% c("blood", "lymphoid tissue", "bone marrow")) %>%
+  group_by(ensg_id) %>% 
+  mutate(only_blood = all(blood)) %>%
+  ungroup() %>% 
+  filter(only_blood) %>%
+  select(1:3) %>%
+  distinct() %>%
+  inner_join(gene_orthologs) %>%
+  inner_join(joined_atlas_comparison %>% 
+               filter(!comparison_tissue %in% c("bone marrow", "retina")) %>%
+               select(mutual_id, comparison_tissue, species, mutual_tmm) %>%
+               separate(mutual_id, into = c("enssscg_id", "ensg_id"))) %>%
+  group_by(ensg_id, species, enhanced_tissues) %>% 
+  mutate(frac = mutual_tmm / sum(mutual_tmm, na.rm = T)) 
+
+plot_data %>%
+  ggplot(aes(frac, comparison_tissue, fill = species)) +
+  geom_boxplot() +
+  facet_wrap(~enhanced_tissues, scales = "free")
+  
+
+plot_data %>%
+  group_by(enhanced_tissues, comparison_tissue, species) %>% 
+  summarise(frac = mean(frac, na.rm = T)) %>%
+  ungroup() %>%
+  left_join(tissue_mapping %>% 
+              select(comparison_tissue, organ_name) %>% 
+              distinct()) %>%
+  arrange(organ_name) %>%
+  mutate(frac = frac * 100,
+         label = ifelse(frac >= 10, 
+                        paste0(comparison_tissue, "\n", 
+                               round(frac, 1), "%"),
+                        NA),
+         species = factor(species, c("human", "pig")),
+         comparison_tissue = factor(comparison_tissue, unique(comparison_tissue))) %>% 
+  
+  
+  {ggplot(., aes(as.numeric(species), frac, fill = comparison_tissue, label = label)) +
+      geom_col(color = "white",
+               size = 0.3,
+               width = 0.55) +
+      geom_area(aes(scales::rescale(as.numeric(species), c(1.25, 1.75))),
+                size = 0.3,
+                color = "white",
+                alpha = 1) +
+      geom_text(size = 2,
+                position = position_stack(vjust = 0.5), color = "white") +
+      facet_wrap(~enhanced_tissues, nrow = 4, scales = "free_x") +
+      scale_x_discrete(labels = levels(.$species),
+                       limits=c("1","2"),
+                       expand = expansion(0)) +
+      scale_y_continuous(expand = expansion(c(0, 0.05))) +
+      # scale_fill_manual(values = colorRampPalette(ggthemes::tableau_color_pal(palette = "Hue Circle", 
+      #                                                                         type = c("regular"), 
+      #                                                                         direction = 1)(19))(n_distinct(plot_data$comparison_tissue))) + 
+      scale_fill_manual(values = tissue_colors_palette_comparison) +
+      # directlabels::geom_dl(aes(label = label), list("top.points", cex = .6)) +
+      stripped_theme_facet +
+      ylab("Fraction of expression") +
+      theme(panel.border = element_blank(),
+            axis.title.x = element_blank())}
+ggsave(savepath("blood decomposition lineage enriched comparison bar.pdf"),
+       width = 12, height = 10)
+
+
+# Lymphoid tissues
+plot_data1 <- 
+  gene_orthologs %>%
+  select(1:2, 4) %>% 
+  left_join(pig_atlas_tissue %>% 
+              filter(tissue_name %in% c("lymph node",
+                                        "spleen",
+                                        "thymus",
+                                        "tonsil")) %>% 
+              select(enssscg_id, tissue_name, pig = ptpm)) %>% 
+  left_join(human_atlas_tissue %>% 
+              filter(tissue_name %in% c("lymph node",
+                                        "spleen",
+                                        "thymus",
+                                        "tonsil")) %>% 
+              select(ensg_id, tissue_name, human = ptpm), 
+            by = c("ensg_id", "tissue_name")) %>%
+  gather(species, ptpm, human, pig) 
+            
+
+plot_data <- 
+  human_gene_class_bloodlineage %>%
+  filter(specificity_category %in% c("Tissue enriched")) %>%
+  select(ensg_id, enhanced_tissues, ts_score) %>% 
+  left_join(human_gene_class %>%
+              select(ensg_id, enhanced_tissues),
+            by = "ensg_id",
+            suffix = c("", "_tissue")) %>% 
+  separate_rows(enhanced_tissues_tissue, sep = ";") %>%
+  mutate(blood = enhanced_tissues_tissue %in% c("blood", "lymphoid tissue", "bone marrow")) %>%
+  group_by(ensg_id) %>% 
+  mutate(only_blood = all(blood)) %>%
+  ungroup() %>% 
+  filter(only_blood) %>%
+  select(1:3) %>%
+  distinct() %>%
+  inner_join(gene_orthologs) %>%
+  inner_join(plot_data1) %>%
+  group_by(ensg_id, species, enhanced_tissues) %>% 
+  mutate(frac = ptpm / sum(ptpm, na.rm = T)) 
+
+plot_data %>%
+  ggplot(aes(frac, tissue_name, fill = species)) +
+  geom_boxplot() +
+  facet_wrap(~enhanced_tissues, scales = "free")
+  
+
+plot_data %>%
+  group_by(enhanced_tissues, tissue_name, species) %>% 
+  summarise(frac = mean(frac, na.rm = T)) %>%
+  ungroup() %>%
+  left_join(tissue_mapping %>% 
+              select(tissue_name, organ_name) %>% 
+              distinct()) %>%
+  arrange(organ_name) %>%
+  mutate(frac = frac * 100,
+         label = ifelse(frac >= 10, 
+                        paste0(tissue_name, "\n", 
+                               round(frac, 1), "%"),
+                        NA),
+         species = factor(species, c("human", "pig")),
+         tissue_name = factor(tissue_name, unique(tissue_name))) %>% 
+  
+  
+  {ggplot(., aes(as.numeric(species), frac, fill = tissue_name, label = label)) +
+      geom_col(color = "white",
+               size = 0.3,
+               width = 0.55) +
+      geom_area(aes(scales::rescale(as.numeric(species), c(1.25, 1.75))),
+                size = 0.3,
+                color = "white",
+                alpha = 1) +
+      geom_text(size = 2,
+                position = position_stack(vjust = 0.5), color = "white") +
+      facet_wrap(~enhanced_tissues, nrow = 4, scales = "free_x") +
+      scale_x_discrete(labels = levels(.$species),
+                       limits=c("1","2"),
+                       expand = expansion(0)) +
+      scale_y_continuous(expand = expansion(c(0, 0.05))) +
+      # scale_fill_manual(values = colorRampPalette(ggthemes::tableau_color_pal(palette = "Hue Circle",
+      #                                                                         type = c("regular"),
+      #                                                                         direction = 1)(19))(n_distinct(plot_data$tissue_name))) +
+      scale_fill_manual(values = prismatic::color(colorRampPalette(c("black", "#A1A8AA", "white"))(9)[2:6])) +
+      # directlabels::geom_dl(aes(label = label), list("top.points", cex = .6)) +
+      stripped_theme_facet +
+      ylab("Fraction of expression") +
+      theme(panel.border = element_blank(),
+            axis.title.x = element_blank())}
+ggsave(savepath("blood decomposition lineage enriched lymphoid bar.pdf"),
+       width = 12, height = 10)
+
+
+
+
+```
+
+###Disease genes overlap comparison
+
+```{r}
+
+disease_gene_classes <- 
+  # read_delim("data/meta/HumanGeneticDisease_Genes.tsv",
+  #          delim = "\t", na = "-") %>%
+  readxl::read_excel("data/meta/HumanGeneticDisease_Genes V2.xlsx") %>%
+  select(disease_system = 1, 
+         disease_type = 2, 
+         disease = 3, 
+         ensg_id = EnsemblID) %>%
+  left_join(human_gene_mapping %>% 
+              select(1:2),
+            by = "ensg_id") %>%
+  filter(!is.na(gene_name)) 
+
+
+joined_comparison_maxtissue <- 
+  joined_atlas_comparison %>% 
+  arrange(-mutual_tmm) %>%
+  group_by(mutual_id, species) %>%
+  top_n(1, mutual_tmm) %>%
+  do({head(., 1)}) %>%
+  ungroup() %>%
+  separate(mutual_id, into = c("enssscg_id", "ensg_id"), sep = "_") %>% 
+  select(1, 2, comparison_tissue, species, mutual_tmm)
+
+human_comparison_maxtissue <- 
+  human_atlas_comparison %>% 
+  arrange(-nx) %>%
+  group_by(ensg_id) %>%
+  top_n(1, nx) %>%
+  do({head(., 1)}) %>%
+  ungroup() %>%
+  select(1, 2, comparison_tissue, nx)
+
+
+joined_comparison_maxexp_classification <- 
+  joined_atlas_comparison %>% 
+  select(mutual_id, comparison_tissue, species, ptpm) %>% 
+  arrange(-ptpm) %>% 
+  group_by(mutual_id, species) %>% 
+  do({head(., 1)}) %>%
+  ungroup() %>%
+  separate(mutual_id, into = c("enssscg_id", "ensg_id")) %>%
+  mutate(gene_id = ifelse(species == "human",
+                          ensg_id, 
+                          enssscg_id)) %>%
+  left_join(bind_rows(pig_gene_comparison_classification %>% 
+                         filter(!is.na(enhanced_tissues)) %>%
+                         # separate_rows(enhanced_tissues, sep = ";") %>% 
+                         select(gene_id = 1, 2, enhanced_tissues),
+                       human_gene_comparison_classification %>% 
+                         filter(!is.na(enhanced_tissues)) %>%
+                         # separate_rows(enhanced_tissues, sep = ";") %>% 
+                         select(gene_id = 1, 2, enhanced_tissues)),
+             by = c("gene_id", "comparison_tissue" = "enhanced_tissues")) %>%
+  select(gene_id, enssscg_id, ensg_id, species, comparison_tissue, specificity_category, ptpm) %>%
+  mutate(specificity_category = ifelse(is.na(specificity_category),
+                                       "not elevated", 
+                                       specificity_category))
+
+
+# 
+# disease_entrez_ensembl_genes <- 
+#   getBM(attributes=c('hgnc_symbol', 'entrezgene_id', 'ensembl_gene_id'),
+#       filters = 'entrezgene_id', values = unique(disease_gene_classes$entrez_id), mart = ensembl) %>%
+#   as_tibble()
+# 
+# disease_entrez_ensembl_genes %>%
+#   write_delim("data/meta/disease_entrez_ensembl_genes.txt", delim = "\t")
+# 
+# 
+# a %>%
+#   select(gene_name, ensg_id, entrez_id) %>% 
+#   distinct %>%
+#   left_join(b,
+#             by = c("entrez_id" = "entrezgene")) %>%
+#   filter(ensembl_gene_id != ensg_id)
+#  
+# b
+
+
+####  
+plot_data <- 
+  disease_gene_classes %>%
+  left_join(gene_orthologs %>% 
+              select(1:2)) %>%
+  left_join(gene_overlap_data_summarized) %>% 
+  mutate(type = case_when(type == "Overlap" ~ "Overlap",
+                          is.na(enssscg_id) ~ "No ortholog",
+                          T ~ "No overlap")) %>%
+  left_join(human_gene_comparison_classification %>% 
+              select(1:2)) %>%
+  left_join(human_comparison_maxtissue %>%
+              select(2, enhanced_tissue_human = comparison_tissue) %>%
+              distinct()) %>% 
+  select(1, ensg_id, type, specificity_category, enhanced_tissue_human) %>%
+  distinct() %>%
+  mutate(tissue_category = ifelse(specificity_category %in% c("Tissue enhanced", 
+                                                              "Tissue enriched", 
+                                                              "Group enriched"),
+                                  enhanced_tissue_human,
+                                  "Not elevated")) %>%
+  left_join(tissue_mapping %>%
+              select(comparison_tissue, organ_name) %>% 
+              distinct(),
+            by = c("tissue_category" = "comparison_tissue")) %>%
+  mutate(organ_name = ifelse(is.na(organ_name), "Not elevated", organ_name)) 
+
+  
+
+plot_data %>%
+  group_by(disease_system, type) %>% 
+  count() %>%
+  group_by(disease_system) %>%
+  mutate(frac = n / sum(n)) %>%
+  ungroup %>%
+  arrange(frac) %>%
+  mutate(disease_system = factor(disease_system, filter(., type == "Overlap") %$% 
+                                   unique(disease_system))) %>%
+  
+                                   {ggplot(., aes(frac * 100, disease_system,
+                                               fill = type, label = paste0(round(frac * 100, 1), "%"))) +
+                                       geom_col() +
+                                       geom_text(position = position_stack(vjust = 0.5),
+                                                 color = "white",
+                                                 fontface = "bold", 
+                                                 size = 2) + 
+                                       scale_x_continuous(expand = expansion(0)) +
+                                       scale_fill_manual(values = c("Overlap" = "#004369",
+                                                                    "No overlap" = "gray",
+                                                                    "No ortholog" = "darkgray")) +
+                                       stripped_theme +
+                                       theme(legend.position = "top") +
+                                       ggplot(., aes(n, disease_system,
+                                                     label = n)) +
+                                       geom_col(aes(fill = type),
+                                                show.legend = F) +
+                                       geom_text(data = . %>% 
+                                                   group_by(disease_system) %>% 
+                                                   summarise(n = sum(n)),
+                                                 color = "white",
+                                                 fontface = "bold", 
+                                                 hjust = 1,
+                                                 size = 2) +
+                                       scale_x_continuous(expand = expansion(0)) +
+                                       scale_fill_manual(values = c("Overlap" = "#004369",
+                                                                    "No overlap" = "gray",
+                                                                    "No ortholog" = "darkgray")) +
+                                       stripped_theme +
+                                       theme(axis.text.y = element_blank(),
+                                             axis.ticks.y = element_blank(),
+                                             axis.title = element_blank())}
+ggsave(savepath("Disease system overlap barplot.pdf"), width = 7, height = 4)  
+  
+plot_order <-
+  plot_data %>%
+  filter(organ_name != "Not elevated") %>%
+  filter(type == "Overlap") %>%
+  mutate(id = paste(disease_system, type)) %>% 
+  group_by(id, organ_name) %>% 
+  count() %>% 
+  spread(organ_name, n, fill = 0) %>% 
+  column_to_rownames("id") %>% 
+  {. / rowSums(.)} %>%
+  t() %>% 
+  dist() %>% 
+  hclust(method = "ward.D2") %>% 
+  labels
+
+plot_data %>%
+  
+  gather(x, stratum, type, organ_name) %>%
+  mutate(stratum = factor(stratum, c(plot_order,
+                                     "Not elevated",
+                                     "No ortholog",
+                                     "No overlap",
+                                     "Overlap"))) %>%
+  ggplot(aes(x = x, stratum = stratum, alluvium = paste(ensg_id, disease_system),
+             fill = stratum, label = stratum)) +
+  geom_flow(show.legend = F) +
+  geom_stratum(show.legend = T,
+               color = NA) +
+  # geom_alluvium(aes(fill = human),
+  #               width = 1/8, knot.pos = 0.25, reverse = FALSE,
+  #               show.legend = F) +
+  # geom_stratum(width = 1/8, reverse = FALSE) +
+  # geom_text(stat = "stratum", aes(label = ifelse(ymax-ymin >= 5, after_stat(as.character(stratum)), "")),
+  #           reverse = T, 
+  #           size = 1.5,
+  #           angle = 90) +
+  stripped_theme_facet +
+  scale_fill_manual(values = c(tissue_colors_palette_organs, 
+                               c("Overlap" = "#004369",
+                                 "No overlap" = "gray",
+                                 "No ortholog" = "darkgray"), 
+                               "not elevated" = "darkgray",
+                               "Not elevated" = "darkgray")) +
+  scale_x_discrete(expand = expansion(1/6)) +
+  scale_y_continuous(expand = expansion(0)) +
+  facet_wrap(~disease_system, scales = "free", ncol = 1, strip.position = "right",
+             labeller = label_wrap_gen()) +
+  coord_flip() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        panel.spacing = unit(0, "mm"))
+ggsave(savepath("Disease system overlap tissue alluvialt.pdf"), width = 6, height = 16)  
+
+
+
+#####
+cor_data <- 
+  disease_gene_classes %>%
+  select(disease_system, ensg_id, gene_name) %>%
+  distinct() %>%
+  left_join(gene_orthologs %>% 
+              select(1:2)) %>%
+  filter(!is.na(enssscg_id)) %>%
+  distinct() %>% 
+  inner_join(joined_atlas_comparison %>% 
+               separate(mutual_id, into = c("enssscg_id", "ensg_id"), sep = "_") %>% 
+               select(1:2, comparison_tissue, species, ptpm)) %>% 
+  spread(species, ptpm) %>% 
+  group_by(ensg_id) %>% 
+  summarise(pearson = cor(log10(human + 1), log10(pig + 1), method = "pearson", use = "pairwise.complete.obs"))
+
+disease_gene_classes %>%
+  left_join(gene_orthologs %>% 
+              select(1:2)) %>%
+  left_join(gene_overlap_data_summarized) %>% 
+  mutate(type = case_when(type == "Overlap" ~ "Overlap",
+                          is.na(enssscg_id) ~ "No ortholog",
+                          T ~ "No overlap")) %>%
+  left_join(human_gene_comparison_classification %>% 
+              select(1:2)) %>%
+  left_join(human_comparison_maxtissue %>%
+              select(2, enhanced_tissue_human = comparison_tissue) %>%
+              distinct()) %>% 
+  select(ensg_id, enssscg_id, gene_name, disease_system, disease_type, disease, 
+         overlap_type = type, 
+         specificity_category_human = specificity_category, 
+         max_tissue_human = enhanced_tissue_human) %>%
+  left_join(cor_data) %>%
+  write_csv(savepath("Disease genes overlap.csv"))
+
+
+
+########
+
+
+plot_data <- 
+  disease_gene_classes %>%
+  left_join(gene_orthologs %>% 
+              select(1:2)) %>%
+  filter(!is.na(enssscg_id)) %>%
+  left_join(joined_comparison_maxexp_classification %>% 
+              mutate(tissue_category = ifelse(specificity_category == "not elevated",
+                                              "not elevated",
+                                              comparison_tissue)) %>%
+              select(enssscg_id, ensg_id, species, tissue_category) %>%  
+              inner_join(gene_orthologs %>% 
+                           select(1:2))) %>%
+  # group_by(species, disease_system) %>% 
+  # count() %>%
+  # ungroup %>%
+  select(disease_system, ensg_id, enssscg_id, gene_name, species, tissue_category) %>%
+  distinct() 
+
+plot_order <- 
+  plot_data %>%
+  mutate(id = paste(disease_system, species)) %>% 
+  group_by(id, tissue_category) %>% 
+  count() %>% 
+  spread(tissue_category, n, fill = 0) %>% 
+  column_to_rownames("id") %>% 
+  t() %>% 
+  {log10(. + 1)} %>%
+  dist() %>% 
+  hclust(method = "ward.D2") %>% 
+  labels
+
+plot_data %>%
+  mutate(tissue_category = factor(tissue_category, plot_order)) %>%
+  ggplot(aes(x = species, stratum = tissue_category, alluvium = paste(ensg_id, disease_system),
+             fill = tissue_category, label = tissue_category)) +
+  geom_flow(show.legend = F) +
+  geom_stratum(show.legend = F,
+               color = NA) +
+  # geom_alluvium(aes(fill = human),
+  #               width = 1/8, knot.pos = 0.25, reverse = FALSE,
+  #               show.legend = F) +
+  # geom_stratum(width = 1/8, reverse = FALSE) +
+  geom_text(stat = "stratum", aes(label = ifelse(ymax-ymin >= 5, after_stat(as.character(stratum)), "")),
+            reverse = T, 
+            size = 1.5) +
+  stripped_theme_facet +
+  scale_fill_manual(values = c(tissue_colors_palette_comparison, "not elevated" = "darkgray")) +
+  scale_x_discrete(expand = expansion(1/6)) +
+  scale_y_continuous(expand = expansion(0)) +
+  facet_wrap(~disease_system, scales = "free") 
+ggsave(savepath("Disease system overlap alluvial.pdf"), width = 10, height = 10)
+
+
+# plot_data <- 
+#   disease_gene_classes %>%
+#   select(disease_system, ensg_id, gene_name) %>%
+#   distinct() %>%
+#   left_join(gene_orthologs %>% 
+#               select(1:2)) %>%
+#   filter(!is.na(enssscg_id)) %>%
+#   distinct() %>% 
+#   inner_join(joined_atlas_comparison %>% 
+#                separate(mutual_id, into = c("enssscg_id", "ensg_id"), sep = "_") %>% 
+#                select(1:2, comparison_tissue, species, ptpm)) %>% 
+#   spread(species, ptpm) %>% 
+#   group_by(disease_system, comparison_tissue) %>% 
+#   summarise(pearson = cor(log10(human + 1), log10(pig + 1), method = "pearson", use = "pairwise.complete.obs"))
+# write_csv(plot_data, savepath("Disease system tissue pearson.csv"))
+# 
+# plot_data %>% 
+#   ggplot(aes(disease_system, pearson)) +
+#   geom_violin(draw_quantiles = 0.5) +
+#   geom_text(data = . %>% 
+#               group_by(disease_system) %>%
+#               top_n(3, pearson),
+#             aes(label = comparison_tissue, 
+#                 color = comparison_tissue),
+#             show.legend = F) +
+#   scale_color_manual(values = tissue_colors_palette_comparison) +
+#   theme(axis.text.x = element_text(angle = 60, hjust = 1))
+  
+
+# plot_data %>% 
+#   spread(comparison_tissue, pearson) %>% 
+#   column_to_rownames("disease_system") %>% 
+#   pheatmap(clustering_method = "ward.D2", 
+#            display_numbers = T, 
+#            number_color = alpha("white", 0.5), 
+#            color = heatmap_palette,
+#            border_color = NA,
+#            filename = savepath("Disease system human pig correlation per tissue.pdf"),
+#            width = 12, height = 6)
+# 
+# 
+# plot_data <- 
+#   disease_gene_classes %>%
+#   select(disease_type, ensg_id, gene_name) %>%
+#   distinct() %>%
+#   left_join(gene_orthologs %>% 
+#               select(1:2)) %>%
+#   filter(!is.na(enssscg_id)) %>%
+#   distinct() %>% 
+#   inner_join(joined_atlas_comparison %>% 
+#                separate(mutual_id, into = c("enssscg_id", "ensg_id"), sep = "_") %>% 
+#                select(1:2, comparison_tissue, species, ptpm)) %>% 
+#   spread(species, ptpm) %>% 
+#   group_by(disease_type, comparison_tissue) %>% 
+#   summarise(pearson = cor(log10(human + 1), log10(pig + 1), method = "pearson", use = "pairwise.complete.obs"))
+# write_csv(plot_data, savepath("Disease type tissue pearson.csv"))
+# 
+# plot_data %>% 
+#   spread(comparison_tissue, pearson) %>% 
+#   column_to_rownames("disease_type") %>% 
+#   pheatmap(clustering_method = "ward.D2", 
+#            display_numbers = T, 
+#            number_color = alpha("white", 0.5), 
+#            color = heatmap_palette,
+#            border_color = NA,
+#            filename = savepath("Disease type human pig correlation per tissue.pdf"),
+#            width = 18, height = 12)
+
+
+# plot_data <- 
+#   disease_gene_classes %>%
+#   select(disease_system, ensg_id, gene_name) %>%
+#   distinct() %>%
+#   left_join(gene_orthologs %>% 
+#               select(1:2)) %>%
+#   filter(!is.na(enssscg_id)) %>%
+#   distinct() %>% 
+#   inner_join(joined_atlas_comparison %>% 
+#                separate(mutual_id, into = c("enssscg_id", "ensg_id"), sep = "_") %>% 
+#                select(1:2, comparison_tissue, species, ptpm)) %>% 
+#   spread(species, ptpm) %>% 
+#   group_by(disease_system, ensg_id) %>% 
+#   summarise(spearman = cor(human, pig, method = "spearman", use = "pairwise.complete.obs"),
+#             pearson = cor(log10(human + 1), log10(pig + 1), method = "pearson", use = "pairwise.complete.obs"))
+# 
+# plot_order <- 
+#   plot_data %>% 
+#   group_by(disease_system) %>% 
+#   summarise(median = median(pearson)) %>% 
+#   arrange(median) %>% 
+#   pull(disease_system)
+# 
+# plot_data %>% 
+#   ungroup() %>%
+#   mutate(disease_system = factor(disease_system, plot_order)) %>%
+#   ggplot(aes(pearson, disease_system)) +
+#   geom_boxplot() +
+#   plot_data %>% 
+#   ungroup() %>%
+#   mutate(disease_system = factor(disease_system, plot_order)) %>%
+#   ggplot(aes(spearman, disease_system)) +
+#   geom_boxplot()
+
+
+########
+
+g <-
+  disease_gene_classes %>%
+  # filter(disease_system == "Cancers") %>%
+  select(disease_system, ensg_id, gene_name) %>%
+  distinct() %>%
+  left_join(gene_orthologs %>% 
+              select(1:2)) %>%
+  filter(!is.na(enssscg_id)) %>%
+  distinct() %>% 
+  inner_join(joined_atlas_comparison %>% 
+               separate(mutual_id, into = c("enssscg_id", "ensg_id"), sep = "_") %>% 
+               select(1:2, comparison_tissue, species, ptpm)) %>% 
+  spread(species, ptpm) %>%
+  left_join(gene_overlap_data,
+             by = c("ensg_id", "enssscg_id", "comparison_tissue" = "comparison_id")) %>% 
+  mutate(type = ifelse(is.na(type), "Not elevated", type)) %>%
+  ggplot(aes(log10(human + 1), log10(pig + 1), color = type)) +
+  geom_point(data = . %>% 
+               filter(type == "Not elevated")) +
+  geom_point(data = . %>% 
+               filter(type != "Not elevated")) +
+  facet_grid(disease_system ~ comparison_tissue) +
+  scale_color_manual(values = c(overlap_type_pal, "Not elevated" = "darkgray")) +
+  stripped_theme_facet +
+  theme(panel.spacing = unit(0, "mm"),
+        strip.text.y = element_text(angle = 0))
+
+ggsave(savepath("Disease system tissue scatter.pdf"), plot = g,
+       width = 50, height = 20, limitsize = F)
+
+######
+
+human_gene_class_bloodlineage %>% 
+  filter(!is.na(ts_score)) %>% 
+  filter(!grepl(",", enhanced_tissues)) %>% 
+  group_by(enhanced_tissues) %>% 
+  top_n(50, ts_score) %>%
+  left_join(human_gene_mapping) %>%
+  select(ensg_id, gene_name, ts_score, cell_type = enhanced_tissues) %>%
+  arrange(cell_type, -ts_score) %>%
+  write_csv(savepath("Blood lineage best markers.csv"))
+
+
+
+#####
+
+plot_data <- 
+  disease_gene_classes %>%
+  left_join(gene_orthologs %>% 
+              select(1:2)) %>%
+  left_join(human_gene_comparison_classification %>% 
+              select(1:2))  %>%
+  left_join(pig_gene_comparison_classification %>% 
+              select(1:2), 
+            by = "enssscg_id",
+            suffix = c("_human", "_pig"))  %>%
+  mutate(specificity_category_pig = ifelse(is.na(specificity_category_pig),
+                                           "No ortholog",
+                                           specificity_category_pig)) %>%
+  select(ensg_id, enssscg_id, specificity_category_human, specificity_category_pig) %>%
+  distinct()
+
+plot_data %>%
+  gather(x, stratum, specificity_category_human, specificity_category_pig) %>%
+  mutate(stratum = factor(stratum, c(spec_category_levels,
+                                     "No ortholog"))) %>%
+  ggplot(aes(x = x, stratum = stratum, alluvium = paste(ensg_id, enssscg_id),
+             fill = stratum, label = stratum)) +
+  geom_flow(show.legend = F) +
+  geom_stratum(show.legend = F,
+               color = NA) +
+  geom_text(stat = "stratum", aes(label = ifelse(ymax-ymin >= 5, after_stat(as.character(stratum)), "")),
+            reverse = T, 
+            size = 1.5) +
+  stripped_theme_facet +
+  scale_fill_manual(values = c(gene_category_pal, 
+                               c("Overlap" = "#004369",
+                                 "No overlap" = "gray",
+                                 "No ortholog" = "darkgray"), 
+                               "not elevated" = "darkgray",
+                               "Not elevated" = "darkgray")) +
+  scale_x_discrete(expand = expansion(1/6)) +
+  scale_y_continuous(expand = expansion(0))
+ggsave(savepath("Disease genes specificity alluvial.pdf"), width = 5, height = 5)  
+
+
+
+```
+
+####Cancer genes
+
+```{r}
+
+disease_gene_classes %>%
+  filter(disease_system == "Cancers") %>%
+  left_join(gene_overlap_data_summarized) %>% 
+  mutate(type = case_when(type == "Overlap" ~ "Overlap",
+                          is.na(type) ~ "No ortholog",
+                          T ~ "No overlap")) %>%
+  group_by(disease_type, type) %>% 
+  count() %>%
+  group_by(disease_type) %>%
+  mutate(frac = n / sum(n)) %>%
+  ungroup %>%
+  arrange(frac) %>%
+  mutate(disease_type = factor(disease_type, filter(., type == "Overlap") %$% 
+                                 unique(disease_type))) %>%
+  
+                                 {ggplot(., aes(frac * 100, disease_type,
+                                                fill = type, label = paste0(round(frac * 100, 1), "%"))) +
+                                     geom_col() +
+                                     geom_text(position = position_stack(vjust = 0.5),
+                                               color = "white",
+                                               fontface = "bold", 
+                                               size = 2) + 
+                                     scale_x_continuous(expand = expansion(0)) +
+                                     scale_fill_manual(values = c("Overlap" = "#004369",
+                                                                  "No overlap" = "gray",
+                                                                  "No ortholog" = "darkgray")) +
+                                     stripped_theme +
+                                     theme(legend.position = "top") +
+                                     ggplot(., aes(n, disease_type,
+                                                   label = n)) +
+                                     geom_col(aes(fill = type),
+                                              show.legend = F) +
+                                     geom_text(data = . %>% 
+                                                 group_by(disease_type) %>% 
+                                                 summarise(n = sum(n)),
+                                               color = "white",
+                                               fontface = "bold", 
+                                               hjust = 1,
+                                               size = 2) +
+                                     scale_x_continuous(expand = expansion(0)) +
+                                     scale_fill_manual(values = c("Overlap" = "#004369",
+                                                                  "No overlap" = "gray",
+                                                                  "No ortholog" = "darkgray")) +
+                                     stripped_theme +
+                                     theme(axis.text.y = element_blank(),
+                                           axis.ticks.y = element_blank(),
+                                           axis.title = element_blank())}
+ggsave(savepath("Disease system overlap barplot cancers.pdf"), width = 7, height = 4) 
+
+```
+
+###MHC genes
+
+```{r}
+
+MHC_genes <- 
+  readxl::read_excel("data/meta/NCBI_MHC_gene.xlsx")
+
+library(biomaRt)
+select <- dplyr::select
+ensembl <- useMart("ensembl",
+                   dataset="sscrofa_gene_ensembl") 
+
+listDatasets(ensembl) %>% 
+  as_tibble %>% 
+  filter(grepl("pig", description)) %>% 
+  pull(1)
+
+a <- getBM(attributes=c('hgnc_symbol', 'entrezgene_id', 'ensembl_gene_id'),mart = ensembl) %>% 
+  as_tibble()
+
+MHC_ensembl_genes <- 
+  getBM(attributes=c('hgnc_symbol', 'entrezgene_id', 'ensembl_gene_id'),
+        filters = 'entrezgene_id', values = unique(MHC_genes$GeneID), mart = ensembl) %>%
+  as_tibble()
+
+MHC_genes %>% 
+  select(GeneID, Symbol) %>% 
+  left_join(MHC_ensembl_genes,
+            by = c("GeneID" = "entrezgene_id")) 
+
+
+a %>%
+  select(gene_name, ensg_id, entrez_id) %>%
+  distinct %>%
+  left_join(b,
+            by = c("entrez_id" = "entrezgene")) %>%
+  filter(ensembl_gene_id != ensg_id)
+
+
+
+
+
+####
+
+
+
+MHC_genes %>% 
+  select(Symbol) %>% 
+  left_join(gene_mapping,
+            by = c("Symbol" = "display_name")) %>%
+  filter(!is.na(enssscg_id))
+
+
+MHC_genes %>% 
+  select(GeneID, Symbol) %>% 
+  left_join(MHC_ensembl_genes,
+            by = c("GeneID" = "entrezgene_id")) %>%
+  select(enssscg_id = ensembl_gene_id) %>% 
+  filter(!is.na(enssscg_id)) %>% 
+  distinct() %>%
+  left_join(pig_atlas_tissue) %>%
+  select(1, 2, nx) %>% 
+  spread(tissue_name, nx) %>% 
+  column_to_rownames("enssscg_id") %>% 
+  {log10(. + 1)} %>%
+  pheatmap(color = heatmap_palette,
+           clustering_method = "ward.D2",
+           border_color = NA)
+  
 
 ```
 
@@ -5689,666 +8062,6 @@ ggsave(savepath("sup5 overlap per quartile.pdf"), width = 12, height = 5)
 
 
 
-## Figure ? - Immunology
-
-###correlation between lymphoid tissues
-
-```{r}
-
-plot_data <- 
-  pig_atlas_tissue %>%
-  filter(tissue_name %in% c("lymph node", "spleen", "thymus", "tonsil")) %>%
-  
-  inner_join(gene_orthologs %>% 
-               select(1:2)) %>%
-  select(enssscg_id, ensg_id, tissue_name, ptpm) %>% 
-  left_join(human_atlas_tissue %>%
-              filter(tissue_name %in% c("lymph node", "spleen", "thymus", "tonsil")) %>%
-              select(1, 2, ptpm),
-            by = c("ensg_id", "tissue_name"),
-            suffix = c("_pig", "_human"))
-
-plot_data %>%
-  gather(species, ptpm, ptpm_pig, ptpm_human) %>%
-  mutate(id = paste(gsub("^ptpm_", "", species), tissue_name)) %>%
-  select(1, 2, id, ptpm) %>% 
-  spread(id, ptpm) %>%
-  select(-1, -2) %>%
-  cor(use = "pairwise.complete.obs", method = "spearman") %>% 
-  {.[which(grepl("human", rownames(.))), which(grepl("pig", rownames(.)))]} %>%
-  
-  
-  pheatmap(clustering_method = "average",
-           # cluster_rows = {dist(1 - .)} %>%
-           #   hclust(method = "average"),
-           # cluster_cols = t(.) %>%
-           #   {dist(1 - .)} %>%
-           #   hclust(method = "average"),
-           cluster_rows = F,
-           cluster_cols = F, 
-           border_color = "white", 
-           display_numbers = T,
-           legend = F,
-           filename = savepath("Lymphoid pig human spearman heatmap.pdf"),
-           width = 3.2, height = 3)
-
-
-lymph_panther <- 
-  read.delim("data/meta/PANTHER15.0_HMM_classifications", header = F) %>%
-  as_tibble() %>%
-  set_names(c("panther_id",
-              "name",
-              "molecular_function",
-              "biological_process",
-              "cellular_components",
-              "protein_class",
-              "Pathway")) %>%
-  filter(grepl("CATHELICIDIN|DEFENSIN|HEPCIDIN", name)) 
-
-# LEAP-2 = LIVER EXPRESSED ANTIMICROBIAL PEPTIDE 2 (LEAP2)
-# PGRP-S = PGLYRP1
-# NKL - only pig? 
-# gene_mapping %>%
-#   filter(display_name %in% c("LEAP2", "PGLYRP1", "NKL"))
-
-DEF_human <- 
-  human_gene_mapping %>%
-  select(ensg_id, gene_name) %>%
-  full_join(read_delim("data/meta/ensembl100_panther_families_human.txt", delim = "\t") %>%
-              set_colnames(c("ensg_id", "panther_id", "gene_name")) %>%
-              inner_join(lymph_panther[, 1:2]) ,
-            by = "gene_name",
-            suffix = c("","100")) %>%
-  filter(!is.na(ensg_id100)) %>%
-  filter(!grepl("SF", panther_id)) %>%
-  distinct() %>%
-  select(ensg_id, gene_name, panther_id, name) %>%
-  bind_rows(human_gene_mapping %>%
-              filter(gene_name %in% c("LEAP2", "PGLYRP1", "NKL")) %>%
-              mutate(panther_id = NA, 
-                     name = gene_name) %>%
-              select(ensg_id, gene_name, panther_id, name)) %>% 
-  distinct()
-
-DEF_pig <- 
-  gene_mapping %>%
-  select(enssscg_id, gene_name = display_name) %>%
-  full_join(read_delim("data/meta/ensembl100_panther_families_pig.txt", delim = "\t") %>%
-              set_colnames(c("enssscg_id", "gene_name", "panther_id")) %>%
-              inner_join(lymph_panther[, 1:2]) ,
-            by = c("enssscg_id"),
-            suffix = c("","100")) %>%
-  filter(!is.na(panther_id)) %>% 
-  
-  filter(!grepl("SF", panther_id)) %>%
-  distinct() %>%
-  select(enssscg_id, gene_name, panther_id, name) %>% 
-  bind_rows(gene_mapping %>%
-              filter(display_name %in% c("LEAP2", "PGLYRP1", "NKL")) %>%
-              mutate(panther_id = NA, 
-                     name = display_name) %>%
-              select(enssscg_id, gene_name = display_name, panther_id, name)) %>% 
-  distinct()
-
-
-DEF_joined <- 
-  full_join(right_join(gene_orthologs %>%
-                         select(1:2),
-                       DEF_human),
-            
-            right_join(gene_orthologs %>%
-                         select(1:2),
-                       DEF_pig),
-            
-            by = c("enssscg_id", "ensg_id", "panther_id", "name"),
-            suffix = c("_human", "_pig")) %>%
-  select(enssscg_id, ensg_id, gene_name_pig, gene_name_human, panther_id, name)
-
-plot_levels <- 
-  bind_rows(pig_atlas_comparison %>%
-              inner_join(DEF_joined) %>%
-              select(gene = enssscg_id, comparison_tissue, nx),
-            
-            human_atlas_comparison %>%
-              inner_join(DEF_joined) %>%
-              select(gene = ensg_id, comparison_tissue, nx)) %>%
-  spread(comparison_tissue, nx) %>% 
-  column_to_rownames("gene") %>% 
-  {log10(. + 1)} %>% 
-  t() %>%
-  dist() %>% 
-  hclust(method = "ward.D2") %>%
-  labels()
-
-
-
-pig_atlas_comparison %>%
-  inner_join(DEF_joined) %>%
-  mutate(comparison_tissue = factor(comparison_tissue, 
-                                    levels = plot_levels)) %>%
-  
-  mutate(gene_name = case_when((gene_name_pig == "NULL" | is.na(gene_name_pig) & 
-                                  is.na(gene_name_human)) ~ enssscg_id,
-                               !(gene_name_pig == "NULL" | is.na(gene_name_pig)) ~ gene_name_pig,
-                               T ~ gene_name_human)) %>%
-  
-  ggplot(aes(gene_name, comparison_tissue, fill = log10(nx + 1))) +
-  geom_tile() +
-  facet_grid(~name, scales = "free_x", space = "free",
-             labeller = label_wrap_gen()) +
-  scale_fill_viridis(option = "B", direction = -1) +
-  scale_x_discrete(expand = expansion(0)) +
-  stripped_theme_facet + 
-  theme(panel.spacing = unit(0.5, "mm"),
-        axis.text.x = element_text(angle = 60, hjust = 1),
-        axis.title = element_blank(),
-        strip.text.x = element_text(angle = 90), 
-        legend.position = "top") + 
-  ggtitle("Pig") +
-  
-  human_atlas_comparison %>%
-  inner_join(DEF_joined) %>%
-  mutate(comparison_tissue = factor(comparison_tissue, 
-                                    levels = plot_levels)) %>%
-  
-  mutate(gene_name = human_gene_mapping$gene_name[match(ensg_id, 
-                                                        human_gene_mapping$ensg_id)]) %>%
-  
-  ggplot(aes(gene_name, comparison_tissue, fill = log10(nx + 1))) +
-  geom_tile() +
-  facet_grid(~name, scales = "free_x", space = "free",
-             labeller = label_wrap_gen()) +
-  scale_fill_viridis(option = "B", direction = -1) +
-  scale_x_discrete(expand = expansion(0)) +
-  stripped_theme_facet + 
-  theme(panel.spacing = unit(0.5, "mm"),
-        axis.text.x = element_text(angle = 60, hjust = 1),
-        axis.title = element_blank(),
-        strip.text.x = element_text(angle = 90), 
-        legend.position = "top",
-        axis.text.y = element_blank()) + 
-  ggtitle("Human")
-  
-ggsave(savepath("HDP human pig expression heatmap.pdf"),
-       width = 10, height = 8)
-
-
-DEF_joined %>%
-  select(1:2) %>%
-  mutate(type = case_when(!is.na(enssscg_id) & !is.na(ensg_id) ~ "Overlap",
-                          !is.na(enssscg_id) ~ "Pig",
-                          !is.na(ensg_id) ~ "Human")) %>%
-  group_by(type) %>% 
-  count() %>%
-  ungroup() %>%
-  pie_plot(class_col = "type", y_col = "n", pal = overlap_type_pal)
-  
-ggsave(savepath("HDP overlap pie.pdf"),width = 4, height = 4)
-
-```
-
-
-####Overlap bipartite network
-
-```{r}
-
-n_conn <- 2
-
-plot_graph <- 
-  overlap_hyper_all %>% 
-  filter(adj_pval < 0.05) %>%
-  group_by(pig_id) %>% 
-  mutate(rank1 = rank(adj_pval)) %>%
-  group_by(human_id) %>% 
-  mutate(rank2 = rank(adj_pval)) %>% 
-  ungroup() %>% 
-  mutate(keep = rank1 <= n_conn |
-           rank2 <= n_conn) %>%
-  filter(keep) %>% 
-  mutate(weight = -log10(adj_pval) / m) %>%
-  arrange(-weight) %>%
-  mutate(pig_id = paste("pig", pig_id),
-         human_id = paste("human", human_id)) %>%
-  select(pig_id, human_id, weight) %>%
-  as_tbl_graph() %>%
-  mutate(species = str_to_sentence(str_extract(name, "pig|human")),
-         comparison_tissue = gsub("pig |human ", "", name)) %>%
-  left_join(tissue_mapping %>% 
-              select(comparison_tissue,
-                     organ_name) %>% 
-              distinct())
-
-plot_layout <- 
-  plot_graph %>% 
-  ggraph::create_layout(layout = "kk", 
-                        weight = 1 - .$weight) %>%
-  as_tibble()
-
-plot_graph %>% 
-  
-  ggraph(layout = "manual", x = plot_layout$x, y = plot_layout$y) +
-
-  geom_point(data = tibble(x = rep(range(plot_layout$x) * 1.2, 2),
-                           y = rep(range(plot_layout$y) * 1.2, each = 2)),
-             aes(x, y),
-             color = NA) +
-  
-  stat_density_2d(geom = "polygon", 
-                  aes(x, y, 
-                      fill = organ_name),
-                  inherit.aes = F,
-                  alpha = 0.5,
-                  bins = 3, 
-                  show.legend = F, 
-                  h = rep(1, 2)) +
-  
-  geom_edge_link(aes(alpha =  weight,
-                     width =  weight)) +
-  geom_node_point(aes(color = species),
-                  size = 5) +
-  
-  geom_node_text(aes(label = comparison_tissue),
-                 size = 2) +
-  
-  scale_edge_width_continuous(range = c(1, 3)) +
-  scale_color_manual(values = overlap_type_pal) +
-  scale_fill_manual(values = tissue_colors_palette_full) +
-  scale_x_continuous(expand = expansion(0)) +
-  scale_y_continuous(expand = expansion(0)) +
-  coord_flip() +
-  theme_stripped +
-  theme(axis.line = element_blank())
-
-ggsave(savepath("Classification overlap network.pdf"), width = 8, height = 8)
-
-```
-
-
-###TLR & IL
-
-```{r}
-
-TLR_genes <- 
-  read_csv("data/meta/pig_immunology_TLR_list.csv")  %>%
-  select(2) %>%
-  left_join(gene_orthologs,
-            by = c("Approved symbol" = "human_gene_name")) %>%
-  filter(!is.na(enssscg_id))
-
-IL_genes <-
-  read_csv("data/meta/pig_immunology_IL_list.csv") %>%
-  select(2) %>%
-  left_join(gene_orthologs,
-            by = c("Approved symbol" = "human_gene_name")) %>%
-  filter(!is.na(enssscg_id))
-
-
-
-# TLR
-
-plot_data <- 
-  joined_atlas_comparison %>% 
-  separate(mutual_id, into = c("enssscg_id", "ensg_id")) %>% 
-  inner_join(TLR_genes) %>%
-  group_by(enssscg_id, species) %>% 
-  mutate(max_tmm = max(mutual_tmm, na.rm = T),
-         mutual_tmm = ifelse(max_tmm == 0, 0, mutual_tmm / max_tmm)) %>%
-  left_join(human_gene_mapping) 
-
-plot_data %>%
-  group_by(comparison_tissue, species) %>%
-  mutate(frac = ptpm / sum(ptpm)) %>%
-  ggplot(aes(species, frac, fill = gene_name)) +
-  geom_col(color = "white") +
-  facet_wrap(~comparison_tissue) +
-  stripped_theme_facet
-  
-
-plot_data2 <-
-  gene_overlap_data_summarized %>%
-  inner_join(TLR_genes) 
-
-plot_data3 <-
-  human_pig_gene_class_comparison %>% 
-  inner_join(plot_data %>% 
-               select(enssscg_id, ensg_id) %>% 
-               distinct()) %>%
-  select(enssscg_id, ensg_id, spec_category_pig, spec_category_human) %>%
-  left_join(human_gene_mapping) %>%
-  gather(species, spec_category, spec_category_pig, spec_category_human) %>%
-  mutate(species = str_to_sentence(gsub("spec_category_", "", species))) %>%
-  left_join(TLR_genes)
-
-
-#####
-
-
-cluster_data <-
-  plot_data %>%
-  ungroup() %>%
-  select(comparison_tissue, species, mutual_tmm, gene_name) %>%
-  group_by(gene_name, comparison_tissue) %>%
-  summarise(mutual_tmm = mean(mutual_tmm)) %>%
-  spread(gene_name, mutual_tmm) %>%
-  column_to_rownames("comparison_tissue")
-
-
-tis_cluster <- 
-  cluster_data %>%
-  dist() %>% 
-  hclust(method = "ward.D2")
-
-tis_order <- 
-  tis_cluster$labels[tis_cluster$order]
-
-gene_order <- 
-  plot_data %>% 
-  ungroup() %>%
-  select(comparison_tissue, species, mutual_tmm, gene_name) %>%
-  spread(species, mutual_tmm) %>%
-  group_by(gene_name) %>% 
-  summarise(dist = sqrt(sum((human - pig) ^ 2))) %>% 
-  arrange(dist) %>% 
-  pull(gene_name)
-  
-  
-
-
-# Plot:
-
-
-plot_data %>% 
-  ungroup() %>%
-  select(gene_name, species) %>% 
-  distinct() %>%
-  mutate(species = toupper(substr(species, 1, 1))) %>%
-  mutate(gene_name = factor(gene_name, gene_order)) %>%
-  
-  
-  ggplot(aes(1, gene_name, group = species, fill = species, label = species)) +
-  geom_tile(show.legend = F, 
-            position = "dodge", 
-            height = 0.9) +
-  geom_text(position = position_dodge(width = 1), 
-            size = 2, 
-            fontface = "bold",
-            color = "white") +
-  scale_fill_manual(values = c("H" = "#DB1F48",
-                               "P" = "#01949A")) +
-  # scale_x_discrete(limits = "Species") +
-  theme_void() +
-  theme(plot.margin = unit(c(0,0,0,0), "mm"),
-        axis.text.x = element_blank()) +
-  
-  # Specificity
-  plot_data3 %>%
-  mutate(gene_name = factor(gene_name, gene_order)) %>%
-  
-  ggplot(aes(1, gene_name, group = species, fill = spec_category, label = species)) +
-  geom_tile(show.legend = F,
-            position = "dodge", 
-            height = 0.9, width = 1) +
-  # geom_text(position = position_dodge(width = 1), 
-  #           size = 2, 
-  #           fontface = "bold",
-  #           color = "white") +
-  scale_fill_manual(values = gene_category_pal) +
-  # scale_x_discrete(limits = "Specificity") +
-  theme_void() +
-  theme(plot.margin = unit(c(0,0,0,0), "mm"),
-        axis.text.y = element_blank()) +
-  
-  
-  # Overlap
-  plot_data2 %>%
-  mutate(gene_name = factor(gene_name, gene_order)) %>%
-  
-  ggplot(aes(1, gene_name, fill = type)) +
-  geom_tile(show.legend = F,
-            height = 0.9) +
-  scale_fill_manual(values = overlap_type_pal) +
-  # scale_x_discrete(limits = "Overlap") +
-  theme_void() +
-  theme(axis.text.x = element_blank()) + 
-  
-  # Heatmap
-  plot_data %>% 
-  ungroup() %>%
-  mutate(gene_name = factor(gene_name, gene_order),
-         comparison_tissue = factor(comparison_tissue, tis_order)) %>%
-  
-  ggplot(aes(gene_name, comparison_tissue, group = species, fill = mutual_tmm)) +
-  geom_tile(position= "dodge", width = 0.9) +
-  coord_flip() +
-  scale_fill_viridis_c(option = "B", direction = -1, name = "Expression") +
-  # facet_grid(ensg_id ~ .) + 
-  # facet_wrap(~gene_name, ncol = 1, strip.position = "left") + 
-  stripped_theme_facet +
-  theme(axis.text.x = element_text(angle = 60, hjust = 1),
-        strip.placement = "outside",
-        strip.text.y.left = element_text(angle = 0),
-        panel.spacing = unit(0, "mm"),
-        legend.position = "right",
-        panel.border = element_rect(fill = NA, color = "white"),
-        axis.title = element_blank(), 
-        axis.line = element_blank()) +
-  theme(plot.margin = unit(c(0,0,0,0), "mm")) +
-  
-  
-  
-  plot_layout(widths = c(0.025, 0.025, 0.025, 1), nrow = 1)
-
-ggsave(savepath("Fig7 TLR heatmap.pdf"),
-       width = 6, height = 2 + 0.15 * n_distinct(plot_data$ensg_id))
-
-
-
-
-
-
-
-# IL
-
-plot_data <- 
-  joined_atlas_comparison %>% 
-  separate(mutual_id, into = c("enssscg_id", "ensg_id")) %>% 
-  inner_join(IL_genes) %>%
-  group_by(enssscg_id, species) %>% 
-  mutate(max_tmm = max(mutual_tmm, na.rm = T),
-         mutual_tmm = ifelse(max_tmm == 0, 0, mutual_tmm / max_tmm)) %>%
-  left_join(human_gene_mapping) 
-
-
-
-plot_data2 <-
-  gene_overlap_data_summarized %>%
-  inner_join(IL_genes) 
-
-plot_data3 <-
-  human_pig_gene_class_comparison %>% 
-  inner_join(plot_data %>% 
-               select(enssscg_id, ensg_id) %>% 
-               distinct()) %>%
-  select(enssscg_id, ensg_id, spec_category_pig, spec_category_human) %>%
-  left_join(human_gene_mapping) %>%
-  gather(species, spec_category, spec_category_pig, spec_category_human) %>%
-  mutate(species = str_to_sentence(gsub("spec_category_", "", species))) %>%
-  left_join(IL_genes)
-
-
-#####
-
-
-cluster_data <-
-  plot_data %>%
-  ungroup() %>%
-  select(comparison_tissue, species, mutual_tmm, gene_name) %>%
-  group_by(gene_name, comparison_tissue) %>%
-  summarise(mutual_tmm = mean(mutual_tmm)) %>%
-  spread(gene_name, mutual_tmm) %>%
-  column_to_rownames("comparison_tissue")
-
-
-tis_cluster <- 
-  cluster_data %>%
-  dist() %>% 
-  hclust(method = "ward.D2")
-
-tis_order <- 
-  tis_cluster$labels[tis_cluster$order]
-
-gene_order <- 
-  plot_data %>% 
-  ungroup() %>%
-  select(comparison_tissue, species, mutual_tmm, gene_name) %>%
-  spread(species, mutual_tmm) %>%
-  group_by(gene_name) %>% 
-  summarise(dist = sqrt(sum((human - pig) ^ 2))) %>% 
-  arrange(dist) %>% 
-  pull(gene_name)
-  
-  
-
-
-# Plot:
-
-
-plot_data %>% 
-  ungroup() %>%
-  select(gene_name, species) %>% 
-  distinct() %>%
-  mutate(species = toupper(substr(species, 1, 1))) %>%
-  mutate(gene_name = factor(gene_name, gene_order)) %>%
-  
-  
-  ggplot(aes(1, gene_name, group = species, fill = species, label = species)) +
-  geom_tile(show.legend = F, 
-            position = "dodge", 
-            height = 0.9) +
-  geom_text(position = position_dodge(width = 1), 
-            size = 2, 
-            fontface = "bold",
-            color = "white") +
-  scale_fill_manual(values = c("H" = "#DB1F48",
-                               "P" = "#01949A")) +
-  # scale_x_discrete(limits = "Species") +
-  theme_void() +
-  theme(plot.margin = unit(c(0,0,0,0), "mm"),
-        axis.text.x = element_blank()) +
-  
-  # Specificity
-  plot_data3 %>%
-  mutate(gene_name = factor(gene_name, gene_order)) %>%
-  
-  ggplot(aes(1, gene_name, group = species, fill = spec_category, label = species)) +
-  geom_tile(show.legend = F,
-            position = "dodge", 
-            height = 0.9, width = 1) +
-  # geom_text(position = position_dodge(width = 1), 
-  #           size = 2, 
-  #           fontface = "bold",
-  #           color = "white") +
-  scale_fill_manual(values = gene_category_pal) +
-  # scale_x_discrete(limits = "Specificity") +
-  theme_void() +
-  theme(plot.margin = unit(c(0,0,0,0), "mm"),
-        axis.text.y = element_blank()) +
-  
-  
-  # Overlap
-  plot_data2 %>%
-  mutate(gene_name = factor(gene_name, gene_order)) %>%
-  
-  ggplot(aes(1, gene_name, fill = type)) +
-  geom_tile(show.legend = F,
-            height = 0.9) +
-  scale_fill_manual(values = overlap_type_pal) +
-  # scale_x_discrete(limits = "Overlap") +
-  theme_void() +
-  theme(axis.text.x = element_blank()) + 
-  
-  # Heatmap
-  plot_data %>% 
-  ungroup() %>%
-  mutate(gene_name = factor(gene_name, gene_order),
-         comparison_tissue = factor(comparison_tissue, tis_order)) %>%
-  
-  ggplot(aes(gene_name, comparison_tissue, group = species, fill = mutual_tmm)) +
-  geom_tile(position= "dodge", width = 0.9) +
-  coord_flip() +
-  scale_fill_viridis_c(option = "B", direction = -1, name = "Expression") +
-  # facet_grid(ensg_id ~ .) + 
-  # facet_wrap(~gene_name, ncol = 1, strip.position = "left") + 
-  stripped_theme_facet +
-  theme(axis.text.x = element_text(angle = 60, hjust = 1),
-        strip.placement = "outside",
-        strip.text.y.left = element_text(angle = 0),
-        panel.spacing = unit(0, "mm"),
-        legend.position = "right",
-        panel.border = element_rect(fill = NA, color = "white"),
-        axis.title = element_blank(), 
-        axis.line = element_blank()) +
-  theme(plot.margin = unit(c(0,0,0,0), "mm")) +
-  
-  
-  
-  plot_layout(widths = c(0.025, 0.025, 0.025, 1), nrow = 1)
-
-ggsave(savepath("Fig7 IL heatmap.pdf"),
-       width = 6, height = 2 + 0.15 * n_distinct(plot_data$ensg_id))
-
-
-
-```
-
-### Blood cell composition
-
-```{r}
-
-
-human_gene_class_blood %>%
-  filter(specificity_category %in% c("Tissue enriched")) %>%
-  select(ensg_id, enhanced_tissues, ts_score) %>% 
-  left_join(human_gene_class %>%
-              select(ensg_id, enhanced_tissues),
-            by = "ensg_id",
-            suffix = c("", "_tissue")) %>% 
-  separate_rows(enhanced_tissues_tissue, sep = ";") %>%
-  mutate(blood = enhanced_tissues_tissue %in% c("blood", "lymphoid tissue", "bone marrow")) %>%
-  group_by(ensg_id) %>% 
-  mutate(only_blood = all(blood)) %>%
-  ungroup() %>% 
-  filter(only_blood) %>%
-  select(1:3) %>%
-  distinct() %>%
-  inner_join(gene_orthologs) %>%
-  inner_join(joined_atlas_comparison %>% 
-               select(mutual_id, comparison_tissue, species, mutual_tmm) %>%
-               separate(mutual_id, into = c("enssscg_id", "ensg_id"))) %>%
-  group_by(ensg_id, species, enhanced_tissues) %>% 
-  mutate(frac = mutual_tmm / sum(mutual_tmm)) %>%
-  ggplot(aes(frac, comparison_tissue, fill = species)) +
-  geom_boxplot() +
-  facet_wrap(~enhanced_tissues, scales = "free")
-  
-
-
-
-as_tibble(rownames = "enssscg_id") %>% 
-  left_join(gene_orthologs) %>%
-  left_join() %>%
-  
-  
-  separate_rows(enhanced_tissues, sep = ",") %>%
-  filter(!is.na(enhanced_tissues)) %>%
-  left_join(plot_data %>%
-              filter(consensus_tissue_name == "lymphoid tissue") %>% 
-              group_by(enssscg_id) %>% 
-              summarise(tmm = sum(tmm)))
-
-```
-
-
 #Side stories
 
 ##Calculations of numbers for manuscript
@@ -6506,6 +8219,27 @@ pig_gene_classification %>%
          Distribution = 3, 
          `Elevated tissues` = enhanced_tissues) %>% 
   write_csv(savepath("supplementary pig gene classification.csv"))
+
+```
+
+##Metabolic example gene scatter
+
+```{r}
+
+joined_atlas_comparison %>% 
+  separate(mutual_id, into = c("enssscg_id", "ensg_id"), sep = "_") %>%
+  inner_join(human_gene_mapping %>% 
+               filter(gene_name %in% c("ABAT", "AGXT2")),
+               # filter(gene_name %in% c("DBH", "MOXD1")),
+             by = "ensg_id") %>%
+  select(enssscg_id, ensg_id, comparison_tissue, species, mutual_tmm, gene_name) %>% 
+  spread(species, mutual_tmm) %>% 
+  ggplot(aes(pig, human, color = comparison_tissue, label = comparison_tissue)) +
+  geom_text(show.legend = F) +
+  facet_wrap(~gene_name) +
+  scale_fill_manual(values = tissue_colors_palette_comparison) +
+  stripped_theme_facet
+  
 
 ```
 
@@ -6861,7 +8595,9 @@ pig_gene_UMAP_GO_res <-
   
   do({
     enrichr(.$human_gene_name,
-            databases = c("GO_Biological_Process_2018")) %>%
+            databases = c("GO_Biological_Process_2018",
+                          "GO_Cellular_Component_2018",
+                          "GO_Molecular_Function_2018")) %>%
       bind_rows(.id = "database")
   }) %>%
   as_tibble()
@@ -7263,6 +8999,76 @@ pig_umap_cluster_tissue_cor %>%
 
 
 
+
+###XGSA
+
+```{r}
+
+library(xgsa)
+
+cardiac.perturbation.data <- read.table("http://cardiaccode.victorchang.edu.au/data/Cardiaccode_in_vivo_evidence_2014_06_10.txt", sep="\t", header=TRUE, quote="\"")
+mouse.cardiac.genes <- unique(unlist(cardiac.perturbation.data[cardiac.perturbation.data$Species == "Mus musculus", c("Regulator","Target")]))
+
+mouse.ensembl.symbol.map <- get_ENSEMBL_symbol_map(species = 'mmusculus')
+mouse.cardiac.ensembl.symbols <- mouse.ensembl.symbol.map$ensembl_gene_id[mouse.ensembl.symbol.map$external_gene_name %in% mouse.cardiac.genes]
+
+mouse.data <- new_XGSA_dataset(species = 'mmusculus', data = list(mouseCardiacGenes = mouse.cardiac.ensembl.symbols), type = 'genesetlist', name = 'MouseCardiacGenes', universe = unique(mouse.ensembl.symbol.map$ensembl_gene_id))
+#
+
+zebrafish.GO <- get_GO('drerio', ontologies = "biological_process")
+#> [1] "retrieved GO"
+zebrafish.GO <- zebrafish.GO[lapply(zebrafish.GO, length) > 10 & lapply(zebrafish.GO, length) < 500]
+zebrafish.GO.data <- new_XGSA_dataset(species = "drerio", data = zebrafish.GO, type = 'genesetlist', name = "ZebrafishGO", universe = unique(unlist(zebrafish.GO)))
+
+# Now we can compare the mouse cardiac genes to the zebrafish gene ontology.
+mouse.cardiac.vs.zebrafish.GO.results <- run_XGSA_test(mouse.data, zebrafish.GO.data)
+#
+# We need to separate the pvalues and the overlapping gene IDs, because XGSA returns both.
+# The p.values are stored in the first element of each result, and the overlapping genes are stored in the second element.
+resulting.pvals <- lapply(mouse.cardiac.vs.zebrafish.GO.results, function(X){ X[["pvals"]] })
+resulting.overlap.genes <- lapply(mouse.cardiac.vs.zebrafish.GO.results, function(X){ X[["genes"]] })
+#
+# Now we perform Benjamini Hochberg multiple hypothesis testing correction to the pvalues.
+adjusted.pvals <- p.adjust(unlist(resulting.pvals), method = "BH")
+#
+# We need to make the names of our results interpretable for humans, so we extract the GO Term IDs
+names(adjusted.pvals) <- unlist(lapply(strsplit(names(adjusted.pvals) ,"\\."), function(X){return(X[[2]])}))
+# We can use another XGSA helper function to find out the GO term names.
+zebrafish.GO.names <- get_GO_names('drerio')
+# And finally we get interpretable names
+names(adjusted.pvals) <- zebrafish.GO.names[match( names(adjusted.pvals), zebrafish.GO.names$go_id),"name_1006"]
+#
+Now let's look at the 10 most significant GO term results
+
+# Now let's look at the 10 most significant GO term results
+significant.GO.Terms <- adjusted.pvals[which(adjusted.pvals < 0.05)]
+print(head(sort(significant.GO.Terms),10))
+#>                             cell fate commitment 
+#>                                     8.363504e-09 
+#>                             mesoderm development 
+#>                                     2.305281e-07 
+#>                          cell fate specification 
+#>                                     2.734734e-07 
+#>                 embryonic heart tube development 
+#>                                     9.498289e-07 
+#>                       cardiocyte differentiation 
+#>                                     4.236265e-06 
+#>                         diencephalon development 
+#>                                     4.506317e-06 
+#>                              heart morphogenesis 
+#>                                     9.151835e-06 
+#>                             endoderm development 
+#>                                     3.238483e-05 
+#>                                heart development 
+#>                                     3.238483e-05 
+#> regulation of endodermal cell fate specification 
+#>                                     3.238483e-05
+par(mar=c(10,5,4,2))
+barplot(-log10(head(sort(significant.GO.Terms),10)), ylab = "- log 10 p-value", las=2)
+
+```
+
+
 ##GSVA
 
 ```{r}
@@ -7465,6 +9271,37 @@ comparison_ortholog_cor %>%
   facet_wrap(~cor_type) +
   scale_fill_viridis() + 
   stripped_theme_facet
+```
+
+##Filter metabolic list
+
+```{r}
+
+read_delim("data/processed/TMM_negtive_spearman_reaction_mapped_diff.txt",
+           delim = "\t") %>%
+  arrange(react_id) %>%
+  filter(pig_TMM > 1 |
+           human_TMM > 1) %>%
+  group_by(react_id, tissue, mutual_id) %>%
+  mutate(direction = sign(pig_TMM - human_TMM),
+         ratio = max(c(pig_TMM, 1)) / max(c(1, human_TMM)),
+         ratio = ifelse(ratio < 1, 1 / ratio, ratio)) %>%
+  ungroup() %>%
+  filter(ratio > 4) %>%
+  inner_join(group_by(., tissue, react_id, direction) %>%
+               count %>%
+               spread(direction, n, fill = 0) %>%
+               filter(`-1` > 0,
+                      `1` > 0) %>%
+               select(1, 2)) %>%
+  group_by(react_id, tissue) %>%
+  mutate(mean_ratio = psych::geometric.mean(ratio)) %>%
+    
+  arrange(-mean_ratio, react_id, tissue, mutual_id) %>%
+  write_csv(savepath("most_extreme_flipdiff_reactions.csv")) 
+  
+  
+
 ```
 
 

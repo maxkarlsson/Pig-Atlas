@@ -208,11 +208,15 @@ elevation_overlap_pal2 <-
     "Enriched in Pig" = "#01949A")
 
 overlap_type_pal <- 
+  # c("Human" = "#DB1F48",
+  #   "Overlap" = "#004369", 
+  #   "Pig" = "#01949A", 
+  #   "Different tissues" = "orangered")
   c("Human" = "#DB1F48",
-    "Overlap" = "#004369", 
-    "Pig" = "#01949A", 
-    "Different tissues" = "orangered")
-
+    "Overlap" = "#004369",
+    "Pig" = "#01949A",
+    "Different tissues" = "#FF9600")
+  
 # protein_type_pal <- 
 #   c("secreted" = '#911D51',
 #     "membrane" = '#6D4BAA', 

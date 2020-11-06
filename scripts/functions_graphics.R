@@ -1367,6 +1367,173 @@ classification_network_plot_2 <-
     fig
   }
 
+classification_network_plot_3 <- 
+  function(class_table, gene_col, spec_col, enriched_col, spec_filter, pal, savename, enriched_sep = ";", 
+           node_filter_rank = 2, node_filter_show_cat = c("tissue enriched"), 
+           node_filter_min = 2, node_filter_n_show = 8, scale_factor = 1, 
+           frac_show = 0.1,
+           force_include_min = 2, force_include_nodes = T) {
+    
+    enrichment_table <- 
+      class_table %>% 
+      select(gene = gene_col, 
+             spec = spec_col, 
+             enriched = enriched_col) %>% 
+      filter(spec %in% spec_filter) %>% 
+      group_by(enriched, spec) %>% 
+      summarise(n_genes = n()) %>%
+      ungroup()
+    
+    net_data <-
+      enrichment_table %>% 
+      mutate(all_enriched = enriched) %>%
+      separate_rows(enriched, sep = enriched_sep) %>%
+      group_by(enriched, spec) %>% 
+      mutate(rank = rank(-n_genes, ties.method = "min")) %>%
+      group_by(all_enriched) %>%
+      mutate(any_low_rank = any(rank <= node_filter_rank)) %>%
+      ungroup() %>%
+      group_by(enriched, spec) %>%
+      mutate(frac = n_genes / sum(n_genes)) %>%
+      ungroup() %>%
+      mutate(keep = (spec == node_filter_show_cat | any_low_rank | n_genes >= node_filter_n_show) &
+               (spec == node_filter_show_cat | n_genes >= node_filter_min) &
+               frac > frac_show) %>%
+      group_by(enriched, spec) %>%
+      mutate(n_keep = sum(keep)) %>%
+      arrange(rank) %>%
+      group_by(enriched, spec) %>% 
+      mutate(row_number = row_number(),
+             keep = ifelse(force_include_nodes & 
+                             n_keep < node_filter_min & 
+                             row_number <= node_filter_min - n_keep & 
+                             n_genes >= force_include_min,
+                           T,
+                           keep)) %>%
+      arrange(-keep) %>%
+      ungroup() %>%
+      group_by(all_enriched) %>%
+      mutate(keep = any(keep)) %>%
+      filter(keep) %>% 
+      mutate(edge_id = paste("enriched:", all_enriched)) %>% 
+      arrange(n_genes)
+    
+    net_edges <- 
+      net_data %$% 
+      tibble(node1 = enriched, node2 = edge_id, n = n_genes) %>% 
+      unique()
+    
+    g <-
+      net_edges %>%
+      graph_from_data_frame(directed = FALSE) %>%
+      ggraph(layout = "kk") 
+    
+    link_map <- 
+      net_edges %>% 
+      gather(node, id, -(3)) %>% 
+      mutate(tissue_node = node == "node1", 
+             color_id = case_when(tissue_node ~ id, 
+                                  grepl(";", id) ~ "Group enriched",
+                                  !grepl(";", id) ~ "Tissue enriched"), 
+             label = ifelse(tissue_node, color_id, n)) %>%
+      select(n, node, id, tissue_node, color_id, label) %>%
+      unique()
+    
+    
+    edge_data <- get_edges()(g$data)
+    node_data <- 
+      get_nodes()(g$data) %>% 
+      as_tibble() %>%
+      left_join(link_map, 
+                by = c("name" = "id")) 
+    
+    
+    fig <- 
+      g + 
+      geom_edge_arc(aes(width = n), 
+                    color = "gray", 
+                    strength = 0, 
+                    alpha = 0.5,
+                    show.legend = F) + 
+      scale_edge_alpha_continuous(range = c(0.3, 1)) +
+      scale_edge_width_continuous(range = c(1, 3)) +
+      
+      geom_node_point(data = node_data  %>%
+                        filter(!tissue_node),
+                      aes(size = log(n), 
+                          fill = color_id), 
+                      stroke = 1,
+                      # size = 10,
+                      shape = 21,
+                      show.legend = F)+
+      geom_node_point(data = node_data %>%
+                        filter(tissue_node),
+                      aes(fill = color_id), 
+                      stroke = 1,
+                      size = 20 * scale_factor,
+                      shape = 21,
+                      show.legend = F)+
+      geom_node_text(data = node_data,
+                     aes(label = label),
+                     size = 4 * scale_factor) +
+      scale_size_continuous(range = c(5, 10) * scale_factor) +
+      scale_fill_manual(values = pal) +
+      
+      theme_void()
+    
+    ## ----- Save
+    
+    
+    cyto_summary <- 
+      net_edges %>% 
+      mutate(category = ifelse(!grepl(enriched_sep, node2), "Tissue enriched", "Group enriched"), 
+             node_id = unclass(factor(node2)),
+             node1 = str_to_sentence(node1), 
+             n_sqrt = sqrt(n), 
+             str_len = str_length(node1)) %>%
+      select(category, node1, node2, node_id, n, n_sqrt, str_len) 
+    
+    cyto_summary %>% 
+      write_delim(savepath(paste(savename, "cytoscape nodes summary.txt")), delim = "\t")
+    
+    bind_rows(cyto_summary %>% 
+                left_join(pal %>% 
+                            enframe("node1", "color")) %>% 
+                select(node_id = node1, 
+                       color) %>% 
+                unique() %>%
+                mutate(node_type = "Tissue"),
+              cyto_summary %>% 
+                mutate(color = case_when(category == "Tissue enriched" ~ "#e41a1c",
+                                         category == "Group enriched" ~ "#FF9D00"), 
+                       node_id = as.character(node_id)) %>%
+                select(node_id, color) %>% 
+                unique() %>%
+                
+                mutate(node_type = "Enrichment")) %>%
+      mutate(color2 = case_when(node_type == "Enrichment" ~ color,
+                                node_type == "Tissue" ~ "#D3D3D3FF"),
+             color3 = case_when(node_type == "Enrichment" ~ color,
+                                node_type == "Tissue" ~ "#BEBEBEFF")) %>% 
+      
+      write_delim(savepath(paste(savename, "cytoscape nodes color.txt")), delim = "\t") 
+    
+    bind_rows(cyto_summary %>% 
+                select(node_id = node1) %>% 
+                mutate(label = node_id) %>%
+                unique(),
+              cyto_summary %>% 
+                mutate(node_id = as.character(node_id), 
+                       label = as.character(n)) %>%
+                select(node_id, label) %>% 
+                unique()) %>% 
+      write_delim(savepath(paste(savename, "cytoscape nodes label whole group.txt")), 
+                  delim = "\t")
+    
+    ## ----
+    
+    fig
+  }
 # ----- Misc plots -----
 
 pie_plot <- 

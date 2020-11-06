@@ -1,12 +1,54 @@
 
 savepath <- 
-  function(savename) { 
+  function(savename, version_ = F) { 
     wd <- getwd()
     result_folder <- paste0(str_extract(wd, ".*Pig Atlas"), "/results/", Sys.Date())
-    
     dir.create(result_folder, showWarnings = FALSE)
     
-    paste0(result_folder, "/", savename)
+    suffix <- 
+      savename %>% 
+      strsplit("\\.") %>%
+      {.[[1]] %>%
+          .[length(.)]}
+    
+    savename <-
+      savename %>% 
+      strsplit("\\.") %>%
+      {.[[1]] %>%
+          .[-length(.)] %>%
+          paste(collapse = "\\.")}
+    
+    
+    
+    
+    if(version_) {
+      vers <- 
+        list.files(result_folder) %>% 
+        enframe() %>%
+        filter(grepl(paste0(savename, "v\\d*.", suffix), value)) %>%
+        mutate(str = str_extract(value, paste0("v\\d*\\.", suffix, "$")) %>%
+                 gsub(paste0("\\.", suffix, "$"), "", .),
+               n = gsub("v", "", str) %>% 
+                 as.numeric()) %>%
+        arrange(-n) %>% 
+        slice(1) %>% 
+        pull(n) 
+      
+      if(length(vers) == 0) {
+        vers <- "v1"
+      } else {
+        vers <- paste0("v", vers + 1)
+      }
+      
+      savename <- 
+        paste0(savename, vers)
+      
+    } 
+    
+    outp <- paste0(result_folder, "/", savename, ".", suffix)
+    
+    return(outp)
+    
   }
 
 omega_sq <- function(aov_in, neg2zero=T){

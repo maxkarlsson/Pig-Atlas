@@ -1802,6 +1802,19 @@ scatter_cor_plot <-
           coord_fixed()}
   }
 
+
+hex_binwidth <- 
+  function(plot, bins) {
+    xrange = diff(ggplot_build(plot1)$layout$panel_params[[1]]$x.range)
+    yrange = diff(ggplot_build(plot1)$layout$panel_params[[1]]$y.range)
+    ratio = xrange/yrange
+    
+    xwidth = xrange/bins
+    ywidth = xwidth/ratio
+    
+    list(ratio = ratio,
+         binwidth = c(xwidth,ywidth))
+  }
 # ----- tissue clustering plots -----
 
 evolutionary_tree_plot <- function(data,
@@ -1865,13 +1878,13 @@ pca_calc <- function(data, npcs) {
     geom_line() +
     simple_theme +
     geom_vline(xintercept = informative_pcs, linetype = "dashed") +
-    annotate("text",
-             x = informative_pcs,
-             y = 0.55,
-             label = paste0("PC ", informative_pcs,
-                            "\nR2 = ", round(pca_stats[informative_pcs, ]$R2cum, 3)),
-             hjust = 1,
-             vjust = 0)
+    ggplot2::annotate("text",
+                      x = informative_pcs,
+                      y = 0.55,
+                      label = paste0("PC ", informative_pcs,
+                                     "\nR2 = ", round(pca_stats[informative_pcs, ]$R2cum, 3)),
+                      hjust = 1,
+                      vjust = 0)
 
   list(pca = pca_res,
        scores = scores(pca_res),

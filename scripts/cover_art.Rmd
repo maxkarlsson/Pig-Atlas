@@ -1,0 +1,377 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+#Setup
+
+##Load packages
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(rgl)
+library(sf)
+library(ggalt)
+library(concaveman)
+source("scripts/theme.R")
+```
+
+
+##Read data
+
+```{r}
+
+
+if(file.exists("data/processed/gene_umap_res.Rdata")) {
+  load("data/processed/gene_umap_res.Rdata")
+  
+} else {
+  source("scripts/gene_umap.R", local = T)
+  load("data/processed/gene_umap_res.Rdata")
+}
+
+```
+
+## Calculate cluster hulls
+
+```{r}
+plot_data_hulls <- 
+  pig_gene_umap %>% 
+  
+  select(merged_cluster, V1, V2) %>% 
+  group_by(merged_cluster) %>% 
+  do({
+    st_as_sf(., coords=c('V1','V2')) %>%
+      concaveman(concavity = 2, length_threshold = .1) %$%
+      st_coordinates(polygons) %>% 
+      as_tibble()
+  })
+
+plot_data_hulls %>% 
+  write_tsv("data/processed/3D UMAP/cluster_hulls.tsv")
+```
+
+#3D UMAP data
+
+```{r}
+#Calculate ranges
+
+x_range <- 
+  pig_gene_umap$V1 %>% 
+  range %>%
+  {.[2] - .[1]}
+
+y_range <- 
+  pig_gene_umap$V2 %>% 
+  range %>%
+  {.[2] - .[1]}
+
+# Calculate density map
+plot_density <- 
+  pig_gene_umap %$% 
+  MASS::kde2d(V1, V2, n = 400, h = 0.5, 
+              lims = c(min(V1) - 0.05*x_range, max(V1) + 0.05*x_range,
+                       min(V2) - 0.05*y_range, max(V2) + 0.05*y_range)) %>% 
+  {.$z} %>%
+  as_tibble(rownames = "x") %>%
+  gather(y, density, -1) 
+
+
+# Calculate scaled ranges
+x_s_range <- 
+  pig_gene_umap %>%
+  filter(n_components == 2 & n_neighbors == 15) %>%
+  pull(V1) %>%
+  range
+
+y_s_range <- 
+  pig_gene_umap %>%
+  filter(n_components == 2 & n_neighbors == 15) %>%
+  pull(V2) %>%
+  range
+
+# Define plot data
+plot_data <-
+  plot_density %>% 
+  mutate(y = gsub("V", "", y),
+         x = as.numeric(x),
+         y = as.numeric(y),
+         group = as.numeric(cut(log10(density + 1), breaks = 10)),
+         group_factor = factor(group, 1:10),
+         color = colorRampPalette(c('red','blue'))(10)[group]) %>%
+  arrange(x,y) %>%
+  mutate(x_s = scales::rescale(x, x_s_range + c(-0.05*x_range, 0.05*x_range)),
+         y_s = scales::rescale(y, y_s_range + c(-0.05*y_range, 0.05*y_range)))
+
+
+plot_x <- unique(plot_data$x_s)
+
+plot_y <- unique(plot_data$y_s)
+
+plot_z <-
+  plot_data %>%
+  select(x, y, density) %>%
+  spread(y, density, fill = NA) %>% 
+  column_to_rownames("x") %>%
+  as.matrix()
+
+plot_col <-
+  ggthemes::tableau_color_pal(palette = "Hue Circle", 
+                              type = c("regular"),
+                              direction = 1)(19) %>%
+  prismatic::color() %>%
+  {.[cut(plot_z, 19)]}
+# zcol2 = as.numeric(apply(z,2, mycut, breaks=nbcol))
+
+
+plot_xlim <- 
+  c(min(plot_x), max(plot_x))
+
+plot_ylim <-
+  c(min(plot_y), max(plot_y))
+
+
+# Calculate density points within hulls
+
+
+plot_data_in_hulls <- 
+  plot_data_hulls %>% 
+  group_by(merged_cluster) %>% 
+  do({
+    
+    plot_data_hulls_group <- 
+      .
+    
+    plot_data %>%
+      bind_cols(plot_data_hulls_group  %$%
+                  sp::point.in.polygon(point.x = plot_data$x_s,
+                                       point.y = plot_data$y_s,
+                                       pol.x = X,
+                                       pol.y = Y) %>%
+                  enframe()) %>%
+  filter(value == 1)
+  }) %>% 
+  ungroup() %>%
+  select(-1) %>%
+  distinct() %>%
+  arrange(x, y)
+
+
+# plot_hulls_x <- unique(plot_data_in_hulls$x_s)
+# 
+# plot_hulls_y <- unique(plot_data_in_hulls$y_s)
+
+plot_hulls_z <-
+  plot_data %>%
+  left_join(plot_data_in_hulls %>% 
+              select(x, y, cor_density = density)) %>%
+  mutate(cor_density = ifelse(is.na(cor_density), 0, cor_density)) %>%
+  select(x, y, cor_density) %>%
+  spread(y, cor_density, fill = 0) %>% 
+  column_to_rownames("x") %>%
+  as.matrix()
+
+
+```
+
+
+#3D UMAP
+
+```{r}
+
+persp3d(x = plot_x, 
+        y = plot_y, 
+        z = plot_z,
+        xlim = plot_xlim,
+        ylim = plot_ylim,
+        # zlim = c(-0.01, max(plot_z)),
+        zlim = c(0, max(plot_z)),
+        # background = "white",
+        # color = plot_col,
+        color = "#7493A3",
+        # alpha = 0.5,
+        aspect = c(1, 1, 0.05),
+        shininess = 1,
+        front = "lines",
+        back = "culled")
+
+
+
+rgl.bg(color = "#063D5B")
+
+
+#Grid lines
+n_lines <- 10
+n_lines_minor <- 6
+n_lines_minor_tot <- 
+  (n_lines - 1)*n_lines_minor - n_lines + 2
+
+line_weight <- 3
+line_color <- 
+  colorRampPalette(c("#063D5B", "white"))(10)[5]
+
+rgl.lines(rep(c(min(plot_x), max(plot_x)), n_lines), 
+          rep(seq(min(plot_y), max(plot_y), length.out = n_lines), each = 2), 
+          0, 
+          lwd = line_weight,
+          color = line_color)
+
+rgl.lines(rep(seq(min(plot_x), max(plot_x), length.out = n_lines), each = 2), 
+          rep(c(min(plot_y), max(plot_y)), n_lines), 
+          0, 
+          lwd = line_weight,
+          color = line_color)
+
+#Minor grid lines
+rgl.lines(rep(c(min(plot_x), max(plot_x)), n_lines_minor_tot), 
+          rep(seq(min(plot_y), max(plot_y), length.out = n_lines_minor_tot), each = 2), 
+          0, 
+          color = line_color)
+
+rgl.lines(rep(seq(min(plot_x), max(plot_x), length.out = n_lines_minor_tot), each = 2), 
+          rep(c(min(plot_y), max(plot_y)), n_lines_minor_tot), 
+          0, 
+          color = line_color)
+
+
+# rgl.bg(color = "#1952A8")
+# rgl.bbox(color = c("#063D5B", "#063D5B"), shininess = 100, emission = "black", specular = "white", alpha = 0)
+# 
+# planes3d(0,0,-1,0.0000001, color = "black")
+
+pig_gene_umap  %$%
+  plot3d(x = V1,
+         y = V2, 
+         z = 0, 
+         color = "black",
+         add = T,
+         xlim = plot_xlim,
+         ylim = plot_ylim,
+         size = 2)
+
+
+for(cl in unique(plot_data_hulls$merged_cluster)) {
+  plot_data_hulls %>%
+    filter(merged_cluster %in% cl) %$%
+    rgl.linestrips(X,
+                   Y,
+                   0, 
+                   color = "#7493A3")
+}
+
+```
+
+
+```{r}
+
+persp3d(x = plot_x, 
+        y = plot_y, 
+        z = plot_hulls_z,
+        xlim = plot_xlim,
+        ylim = plot_ylim,
+        # zlim = c(-0.01, max(plot_z)),
+        zlim = c(0.00001, max(plot_hulls_z)),
+        # background = "white",
+        # color = plot_col,
+        color = "#7493A3",
+        # alpha = 0.5,
+        aspect = c(1, 1, 0.05),
+        shininess = 1,
+        front = "lines",
+        back = "culled")
+
+
+rgl.bg(color = "#063D5B")
+
+#Grid lines
+n_lines <- 10
+n_lines_minor <- 6
+n_lines_minor_tot <- 
+  (n_lines - 1)*n_lines_minor - n_lines + 2
+
+line_weight <- 3
+line_color <- 
+  colorRampPalette(c("#063D5B", "white"))(10)[5]
+
+rgl.lines(rep(c(min(plot_x), max(plot_x)), n_lines), 
+          rep(seq(min(plot_y), max(plot_y), length.out = n_lines), each = 2), 
+          0, 
+          lwd = line_weight,
+          color = line_color)
+
+rgl.lines(rep(seq(min(plot_x), max(plot_x), length.out = n_lines), each = 2), 
+          rep(c(min(plot_y), max(plot_y)), n_lines), 
+          0, 
+          lwd = line_weight,
+          color = line_color)
+
+#Minor grid lines
+rgl.lines(rep(c(min(plot_x), max(plot_x)), n_lines_minor_tot), 
+          rep(seq(min(plot_y), max(plot_y), length.out = n_lines_minor_tot), each = 2), 
+          0, 
+          color = line_color)
+
+rgl.lines(rep(seq(min(plot_x), max(plot_x), length.out = n_lines_minor_tot), each = 2), 
+          rep(c(min(plot_y), max(plot_y)), n_lines_minor_tot), 
+          0, 
+          color = line_color)
+
+
+# rgl.bg(color = "#1952A8")
+# rgl.bbox(color = c("#063D5B", "#063D5B"), shininess = 100, emission = "black", specular = "white", alpha = 0)
+# 
+# planes3d(0,0,-1,0.0000001, color = "black")
+
+pig_gene_umap  %$%
+  plot3d(x = V1,
+         y = V2, 
+         z = 0, 
+         color = "black",
+         add = T,
+         xlim = plot_xlim,
+         ylim = plot_ylim,
+         size = 2)
+
+
+for(cl in unique(plot_data_hulls$merged_cluster)) {
+  plot_data_hulls %>%
+    filter(merged_cluster %in% cl) %$%
+    rgl.linestrips(X,
+                   Y,
+                   0, 
+                   color = "#7493A3")
+}
+
+
+
+```
+
+# save UMAP
+
+```{r}
+rgl.surface(x = plot_x, 
+            y = plot_z, 
+            z = plot_y,
+            coords = c(1,
+                       3, 
+                       2))
+            # xlim = plot_xlim,
+            # ylim = plot_ylim,
+            # zlim = c(0, max(plot_z)))
+
+
+for(cl in unique(plot_data_hulls$merged_cluster)) {
+  plot_data_hulls %>%
+    filter(merged_cluster %in% cl) %$%
+    rgl.linestrips(X,
+                   Y,
+                   0, 
+                   add = T,
+                   color = "#7493A3")
+}
+writeOBJ("data/processed/3D UMAP/density_mesh.obj" )
+```
+

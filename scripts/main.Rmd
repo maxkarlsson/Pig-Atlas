@@ -10824,6 +10824,19 @@ names(session_pkg$loadedOnly) %>%
     capture.output(utils:::print.bibentry(citation(x), style = "Bibtex"),
                    file = savepath(paste0(x, ".bib")))}) 
 
+
+"Cytoscape (v 3.6.1), limma (v 3.44.3), fpc (v 2.2-8), enrichR (v 2.1), Affinity designer (v 1.8.5.703), Blender (v 2.90.1), ggplot2 (v 3.3.2), concaveman (v 1.1.0), dendextend (v 1.14.0), ellipse (v 0.4.2), ggalluvial (v 0.12.2), ggalt (v 0.4.0), ggbeeswarm (v 0.6.0), ggdendro (v 0.1.22), ggforce (v 0.3.2), ggraph (v 2.0.3), ggrepel (v 0.8.2), ggridges (v 0.5.2), ggthemes (v 4.2.0), igraph (v 1.2.6), patchwork (v 1.0.1), pcaMethods (v 1.80.0), pheatmap (v 1.0.12), rrvgo (v 1.0.1), sf (v 0.9-6), tidygraph (v 1.2.0), treemapify (v 2.5.3), umap (v 0.2.6.0), uwot (v 0.1.8), viridis (v 0.5.1)" %>%
+  str_split(", ") %>%
+  unlist() %>%
+  enframe() %>% 
+  separate(value, into = c("pkg", "v"), sep = " \\(v ") %>%
+  mutate(v = gsub("\\)", "", v),
+         id = paste(pkg, v)) %>%
+  arrange(pkg) %>%
+  write_csv(savepath("KRT packages.csv"))
+
+
+
 capture.output(utils:::print.bibentry(RStudio.Version()$citation, style = "Bibtex"),
                file = savepath("RStudio.bib"))
 

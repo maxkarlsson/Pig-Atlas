@@ -1860,6 +1860,7 @@ evolutionary_tree_plot <- function(data,
 
 pca_calc <- function(data, npcs) {
   
+  require(pcaMethods)
   pca_res <-
     data %>%
     pcaMethods::pca(nPcs = npcs)
@@ -1876,7 +1877,7 @@ pca_calc <- function(data, npcs) {
     ggplot(aes(PC, R2cum)) +
     geom_point() +
     geom_line() +
-    simple_theme +
+    # simple_theme +
     geom_vline(xintercept = informative_pcs, linetype = "dashed") +
     ggplot2::annotate("text",
                       x = informative_pcs,
@@ -2031,7 +2032,7 @@ plot_dendrogram <-
   }
 
 umap_calc <- function(data, npcs = 2, n_epochs = 400, n_neighbors = round(sqrt(dim(data)[1]))) {
-  
+  require(uwot)
   data %>%
     umap(n_components = npcs,
          n_epochs = n_epochs,

@@ -2291,6 +2291,93 @@ ggsave(savepath("Figure2 Alluvial.pdf"), width = 7, height = 2.5, useDingbats = 
 
 ```
 
+### Classification pie chart
+
+```{r}
+
+plot_data <-
+  pig_gene_classification %>% 
+  select(enssscg_id, specificity_category, distribution_category) %>% 
+  gather(class_type, class, -1) %>% 
+  group_by(class_type, class) %>% 
+  count() %>%
+  group_by(class_type) %>% 
+  mutate(perc = 100 * n / sum(n),
+         label = paste0(n, "\n", round(perc, 1), "%")) %>% 
+  ungroup() %>% 
+  mutate(class = factor(str_to_sentence(class), unique(c(spec_category_levels, dist_category_levels), fromLast = T)),
+         class_type = factor(str_to_sentence(gsub("_category", "", class_type)),
+                             c("Specificity", "Distribution")))
+    
+plot_dodge = 0.1
+plot_data %>% 
+  arrange(match(class, rev(levels(class)))) %>% 
+  group_by(class_type) %>% 
+  mutate(y_stack = cumsum(n) - n/2) %>% 
+  {ggplot(., aes(1, n, fill = class, group = class, 
+                 label = label)) +
+      geom_col(show.legend = F, 
+               color = "white", 
+               width = 1) + 
+      geom_segment(aes(x = 1.5 + plot_dodge, xend = 1.5, 
+                       y = y_stack, yend = y_stack), size = 0.5) +
+      geom_text_repel(aes(x = 1.5 + plot_dodge, y = y_stack), 
+                      color = "black", nudge_x = plot_dodge, 
+                      segment.size = 0.5, size = 24/11) +
+      scale_fill_manual(values = gene_category_pal) + 
+      facet_wrap(~class_type) +
+      coord_polar("y") +
+      theme_void() + 
+      scale_x_continuous(expand = expansion(c(0,0.8)))}
+ggsave(savepath("Class pies.pdf"), 
+       width = 5, height = 4)
+
+```
+
+### Classification ezamples 
+
+```{r}
+gene_mapping %>% 
+  filter(display_name %in% c("MOG",
+                             "MYL2",
+                             "A2M",
+                             "RPS16")) %>% 
+  inner_join(pig_gene_classification) %>% 
+  inner_join(pig_atlas_consensus) %>% 
+  inner_join(tissue_mapping %>% 
+               select(consensus_tissue_name, organ_name) %>% 
+               distinct(),
+             by = c("tissue" = "consensus_tissue_name")) %>% 
+  arrange(organ_name) %>% 
+  mutate(tissue = factor(tissue, unique(tissue)),
+         display_name = factor(display_name, 
+                               c("MOG",
+                                 "MYL2",
+                                 "A2M",
+                                 "RPS16"))) %>% 
+  group_by(display_name) %>% 
+  mutate(nx = nx/max(nx)) %>% 
+  
+  ggplot(aes(tissue, nx, fill = tissue)) +
+  geom_col(show.legend = F) +
+  facet_wrap(~ display_name + specificity_category,
+             scales = "free", ncol = 1, strip.position = "left") +
+  scale_fill_manual(values = tissue_colors_palette_full) +
+  scale_y_continuous(expand = expansion(0)) +
+  simple_theme +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.border = element_blank(), 
+        axis.line = element_line(),
+        panel.spacing = unit(0, "mm"))
+ggsave(savepath("Classification examples.pdf"), 
+       width = 4, height = 4)
+
+
+
+```
+
+
 ###Classification barplot
 
 ```{r Figure2_classification_bar, echo=FALSE, message=FALSE, warning=FALSE}

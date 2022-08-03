@@ -3116,6 +3116,17 @@ cluster_contribution_color <-
   set_names(color, merged_cluster)
 ####
 
+pig_gene_umap %>%
+  ggplot(aes(V1, V2)) +
+  ggrastr::geom_point_rast(size = 0.2,
+                           shape = 16,
+                           stroke = 0, raster.dpi = 600) +
+  stripped_theme_facet +
+  coord_fixed() +
+  labs(x = "UMAP1", 
+       y = "UMAP2")
+ggsave(savepath("Gene UMAP points.pdf"), width = plot_width, height = plot_height)
+
 
 plot_bins <- 200
 plot_width <- 4
@@ -3143,6 +3154,37 @@ plot <-
 
 
 ggsave(savepath("Gene UMAP hex.pdf"), plot = plot, width = plot_width, height = plot_height)
+
+
+pig_gene_umap %>%
+  ggplot(aes(V1, V2)) +
+  geom_hex(aes(fill = stat(log10(count))),
+           bins = 100,
+           show.legend = T) +
+  scale_fill_viridis_c() +
+  scale_color_viridis_c() +
+  stripped_theme_facet +
+  coord_fixed() +
+  theme(legend.position = "bottom")+
+  labs(x = "UMAP1", 
+       y = "UMAP2")
+
+ggsave(savepath("Gene UMAP hex density.pdf"), width = plot_width, height = plot_height)
+
+pig_gene_umap %>%
+  ggplot(aes(V1, V2)) +
+  geom_density2d_filled(bins = 300,
+                        h = 0.4,
+                        show.legend = F) +
+  # scale_fill_viridis_c() +
+  # scale_color_viridis_c() +
+  stripped_theme_facet +
+  coord_fixed() +
+  theme(legend.position = "bottom")
+
+ggsave(savepath("Gene UMAP hex density.pdf"), width = plot_width, height = plot_height)
+
+
 
 plot <-
   pig_gene_umap %>%
@@ -11819,6 +11861,968 @@ read_delim("data/processed/TMM_negtive_spearman_reaction_mapped_diff.txt",
   write_csv(savepath("most_extreme_flipdiff_reactions.csv")) 
   
   
+
+```
+
+##Sample variance
+
+```{r}
+
+library(limma)
+library(multidplyr)
+
+anova_data <- 
+  pig_atlas_sample_wide_tmm %>% 
+  {log2(. + 1)} %>% 
+  t() %>% 
+  scale() %>% 
+  t()
+
+anova_meta <- 
+  colnames(pig_atlas_sample_wide_tmm) %>% 
+  enframe("i", "sample_id") %>% 
+  separate(sample_id, into = c("tissue_id", "individual"),
+           remove = F, sep = "_") %>% 
+  left_join(sample_meta) %>% 
+  left_join(tissue_mapping %>% 
+              select(tissue_id = tissue, tissue_name))
+
+all(colnames(anova_data) == anova_meta$sample_id)
+
+anova_tissues <- 
+  pig_atlas_sample_norm %>% 
+  select(sample_ID, individual, tissue_ID) %>% 
+  distinct() %>% 
+  group_by(tissue_ID) %>% 
+  count() %>% 
+  ungroup() %>% 
+  arrange(-n) %>% 
+  filter(n == 4)
+
+anova_genes <- 
+  pig_atlas_sample_norm %>% 
+  filter(tissue_ID %in% anova_tissues$tissue_ID) %>% 
+  group_by(enssscg_id) %>% 
+  filter(any(tmm >= 1)) %>% 
+  ungroup() %>% 
+  select(enssscg_id) %>% 
+  distinct()
+
+
+####################################
+
+
+pig_atlas_sample_norm %>% 
+  filter(tissue_ID %in% anova_tissues$tissue_ID) %>% 
+  filter(enssscg_id %in% anova_genes$enssscg_id) %>% 
+  # filter(enssscg_id %in% sample(unique(enssscg_id), 10)) %>% 
+  select(enssscg_id, individual, tissue_ID, tmm) %>% 
+  left_join(sample_meta) %>% 
+  left_join(tissue_mapping %>% 
+              select(tissue_ID = tissue, tissue_name)) %>% 
+  select(-tissue_ID) %>% 
+  mutate(tmm = log2(tmm + 1)) %>% 
+  group_by(enssscg_id) 
+
+design <-
+  model.matrix(~ 0 + sex + tissue_name,# + tissue_name:sex + sex, 
+               anova_meta %>% 
+                 filter(tissue_id %in% anova_tissues$tissue_ID)) 
+
+
+colnames(design) <- gsub(" |\\(|\\)", "_", colnames(design))
+
+fit <- limma::lmFit(anova_data[anova_genes$enssscg_id,
+                               which(gsub("_.$", "", 
+                                          colnames(anova_data)) %in% 
+                                       anova_tissues$tissue_ID)],
+                    design)
+
+fit_contrasts <- makeContrasts(sex = sexmale - sexfemale,
+                              
+                           levels=design)
+
+fit2 <- limma::contrasts.fit(fit, fit_contrasts)
+fit3 <- limma::eBayes(fit2, trend = FALSE)
+lapply(colnames(fit3$contrasts),
+       FUN = function(con) limma::topTable(fit3, coef=con, number=Inf,
+                                           adjust.method="BH", p.value=1) %>%
+         as_tibble(rownames = "variable")) %>%
+  set_names(colnames(fit3$contrasts)) %>%
+  bind_rows(.id = "term") %>% 
+  filter(adj.P.Val < 0.05) %>%
+  left_join(gene_chromosome %>% 
+              select(variable = 1, 
+                     chromosome = 4) %>% 
+              distinct()) %>%   
+  mutate(chromosome = ifelse(!chromosome %in% c("X", "Y"),#str_length(chromosome) > 2, 
+                             "other", 
+                             chromosome),
+         color = abs(logFC) > 1) %>% 
+  left_join(gene_mapping,
+            by = c("variable" = "enssscg_id")) %>% 
+  mutate(gene_label = ifelse(display_name == "NULL" | !color,
+                             NA, 
+                             display_name)) %>%
+  # View
+  ggplot(aes(logFC, -log10(adj.P.Val), color = color, label = gene_label)) +
+  geom_vline(xintercept = c(-1, 1) * 1,
+             linetype = "dashed") +
+  geom_point(size =1) +
+  geom_text(size = 2) +
+  facet_wrap(~chromosome) +
+  coord_fixed(1/60) +
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" = "gray")) +
+  theme_bw()
+ggsave(savepath("limma sex genes.pdf"),
+       width = 10, height = 4)
+##################################################
+
+
+worker_cluster <- new_cluster(n = 5)
+cluster_library(worker_cluster, c("dplyr",
+                                  "tidyverse"))
+cluster_copy(worker_cluster, c("lm",
+                               "aov", 
+                               "omega_sq"))
+
+sample_anova <- 
+  pig_atlas_sample_norm %>% 
+  filter(tissue_ID %in% anova_tissues$tissue_ID) %>% 
+  filter(enssscg_id %in% anova_genes$enssscg_id) %>% 
+  # filter(enssscg_id %in% sample(unique(enssscg_id), 10)) %>% 
+  select(enssscg_id, individual, tissue_ID, tmm) %>% 
+  left_join(sample_meta) %>% 
+  left_join(tissue_mapping %>% 
+              select(tissue_ID = tissue, tissue_name)) %>% 
+  select(-tissue_ID) %>% 
+  mutate(tmm = log2(tmm + 1)) %>% 
+  group_by(enssscg_id) %>% 
+  partition(worker_cluster) %>% 
+  do({
+    g_data <<- .
+    
+    lm_model <- lm(tmm ~ sex + tissue_name, 
+                   data = g_data)
+    
+    aov_model <- aov(lm_model)
+  
+    omega_sq(aov_model) %>% 
+      enframe("term", "omega_sq")
+    }) %>% 
+  ungroup() %>% 
+  collect() %>% 
+  mutate(term = trimws(term))
+
+rm(worker_cluster)
+var_pal <- 
+  c(Residuals = "darkgray",
+    # individual = "#611052",
+    sex = "#3E71A8",
+    # "sex:tissue_name" = "#3E71A8",
+    tissue_name = "orangered")
+
+
+sample_anova %>% 
+  group_by(term) %>% 
+  summarise(omega_sq = sum(omega_sq)) %>% 
+  ungroup() %>% 
+  mutate(omega_sq = omega_sq / sum(omega_sq),
+         term = factor(term, names(var_pal))) %>% 
+  ggplot(aes(1, omega_sq, fill = term, 
+             label = paste(round(100 * omega_sq, 1), 
+                           "%"))) +
+  geom_col() +
+  geom_text(position = position_stack(vjust = 0.5)) +
+  scale_fill_manual(values = var_pal) +
+  scale_y_continuous(breaks = 0:1, 
+                     expand = expansion(0)) +
+  theme_bw() +
+  labs(y = "% Variance (omegaSq)") + 
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.line.y = element_line(),
+        panel.border = element_blank())
+ggsave(savepath("tissue anova omega bar.pdf"),
+       width = 4, height = 3)
+
+sample_anova %>% 
+  mutate(term = factor(term, names(var_pal))) %>% 
+  ggplot(aes(term, omega_sq, fill = term)) +
+  geom_violin(scale = "width", draw_quantiles = 0.5) +
+  scale_fill_manual(values = var_pal) +
+  scale_y_continuous(breaks = 0:1) +
+  theme_bw()+
+  labs(y = "% Variance (omegaSq)") 
+ggsave(savepath("tissue anova omega violin.pdf"),
+       width = 6, height = 3)
+
+plot_ann <- 
+  sample_anova %>% 
+  group_by(enssscg_id) %>% 
+  filter(term %in% c("sex", "individual") & omega_sq > 0.25) %>% 
+  ungroup() %>% 
+  left_join(gene_mapping) %>%
+  mutate(display_name = ifelse(display_name != "NULL",
+                               display_name, 
+                               NA))
+
+sample_anova %>% 
+  mutate(term = factor(term, names(var_pal))) %>% 
+  ggplot(aes(term, omega_sq, fill = term)) +
+  geom_violin(scale = "width", draw_quantiles = 0.5) +
+  geom_point(data = plot_ann) +
+  geom_text_repel(data = plot_ann, 
+                  aes(label = display_name),
+                  size = 2) +
+  scale_fill_manual(values = var_pal) +
+  scale_y_continuous(breaks = 0:1) +
+  theme_bw()+
+  labs(y = "% Variance (omegaSq)") 
+ggsave(savepath("tissue anova omega violin labeled.pdf"),
+       width = 6, height = 3)
+
+
+plot <- 
+  sample_anova %>% 
+  mutate(term = factor(term, names(var_pal)),
+         enssscg_id = factor(enssscg_id,
+                             filter(., term == "Residuals") %>% 
+                               arrange(omega_sq) %>% 
+                               pull(enssscg_id))) %>% 
+  ggplot(aes(enssscg_id, omega_sq, fill = term)) +
+  geom_col() +
+  scale_fill_manual(values = var_pal) +
+  scale_y_continuous(breaks = 0:1,
+                     expand = expansion(0)) +
+  theme_bw()+
+  labs(y = "% Variance (omegaSq)")  +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+ggsave(savepath("tissue anova omega genecol.pdf"),
+       plot = plot,
+       width = 10, height = 5)
+
+sample_anova %>% 
+  filter(term == "sex") %>% 
+  arrange(-omega_sq) %>% 
+  filter(omega_sq > 0.25) %>% 
+  left_join(gene_chromosome %>% 
+              select(enssscg_id = 1, chromosome = 4) %>% 
+              distinct) %>% 
+  mutate(chromosome = factor(chromosome, c(1:23, "X", "Y", "MT"))) %>% 
+  group_by(chromosome) %>% 
+  count() %>% 
+  ggplot(aes(chromosome, n, label = n)) +
+  geom_col() +
+  geom_text(vjust = 0) +
+  theme_minimal()
+ggsave(savepath("tissue anova sex gene chromosomes.pdf"),
+       width = 4, height = 3)  
+
+
+hclust_factor_labels <- 
+  function(dat, x, y, value, 
+           dist_method = "euclidian",
+           clust_method = "ward.D2") {
+    dat %>% 
+      select(all_of(c(x, y, value))) %>% 
+      rename(x = 1, 
+             y = 2, 
+             value = 3) %>% 
+      spread(y, value) %>% 
+      column_to_rownames("x") %>% 
+      dist(method = dist_method) %>% 
+      hclust(method = clust_method) %>% 
+      with(labels[order])
+  }
+
+plot_data <- 
+  sample_anova %>% 
+  group_by(enssscg_id) %>% 
+  filter(any(term %in% c("sex", "individual") & omega_sq > 0.25)) %>% 
+  ungroup() %>% 
+  left_join(gene_chromosome %>% 
+              select(enssscg_id = 1, chromosome = 4) %>% 
+              distinct) %>% 
+  left_join(gene_mapping) %>% 
+  mutate(gene_label = ifelse(display_name == "NULL",
+                             enssscg_id, 
+                             display_name),
+         chromosome = factor(ifelse(str_length(chromosome)>2, 
+                                    "other", 
+                                    chromosome), c(1:23, "X", "Y", "MT", "other")),
+         term = factor(term, names(var_pal)),
+         enssscg_id = factor(enssscg_id,
+                             filter(., term == "Residuals") %>% 
+                               arrange(omega_sq) %>% 
+                               pull(enssscg_id))) %>% 
+  mutate(gene_label = factor(gene_label, 
+                             hclust_factor_labels(., 
+                                                  "gene_label", 
+                                                  "term", "omega_sq"))) 
+
+
+p1 <- 
+  plot_data %>% 
+  select(gene_label, chromosome) %>% 
+  distinct() %>% 
+  ggplot(aes(gene_label, chromosome)) +
+  geom_point() +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank())
+p2 <- 
+  plot_data %>% 
+  ggplot(aes(gene_label, omega_sq, fill = term)) +
+  geom_col() +
+  scale_fill_manual(values = var_pal) +
+  scale_y_continuous(breaks = 0:1,
+                     expand = expansion(0)) +
+  theme_bw()+
+  labs(y = "% Variance (omegaSq)")  +
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust = 0.3))
+
+p1/p2
+ggsave(savepath("Highvar sex ind genes.pdf"),
+       width = 8, height = 6)
+
+# sample_anova %>%
+#   rename(term1 = term,
+#          omega_sq1 = omega_sq) %>% 
+#   expand_grid(term2 = unique(.$term1)) %>% 
+#   left_join(select(., enssscg_id, omega_sq2 = omega_sq1, term2 = term1) %>% 
+#               distinct()) %>% 
+#   # filter(term1 < term2) %>% 
+#   ggplot(aes(omega_sq1, omega_sq2)) +
+#   geom_hex(aes(fill = stat(log10(count)))) +
+#   facet_grid(term2 ~ term1)
+#   spread()
+
+############################
+
+sample_cor <- 
+  pig_atlas_sample_wide_tmm %>% 
+  cor(method = "spearman")
+
+plot_data <- 
+  sample_cor %>% 
+  as_tibble(rownames = "sample1") %>% 
+  gather(sample2, cor, -1) %>% 
+  separate(sample1, into = c("tissue1", "ind1"), sep = "_", remove = F) %>% 
+  separate(sample2, into = c("tissue2", "ind2"), sep = "_", remove = F) %>% 
+  mutate(type = ifelse(tissue1 == tissue2,
+                       "same tissue", 
+                       "diff tissue")) %>% 
+  filter(sample1 != sample2) %>% 
+  left_join(tissue_mapping %>% 
+              select(tissue, tissue_name, organ_name),
+            by = c("tissue1" = "tissue")) %>% 
+  left_join(tissue_mapping %>% 
+              select(tissue, organ_name2 = organ_name),
+            by = c("tissue2" = "tissue")) 
+  
+plot_data %>% 
+
+  left_join(filter(., type == "diff tissue") %>% 
+              group_by(tissue_name) %>% 
+              summarise(sd = sd(cor), 
+                        mean = mean(cor))) %>% 
+  mutate(z_score = (cor - mean) / sd) %>% 
+  filter(type == "same tissue") %>% 
+  arrange(z_score) %>% 
+  mutate(tissue_name = factor(tissue_name, unique(tissue_name))) %>% 
+  ggplot(aes(z_score, tissue_name)) +
+  geom_boxplot()
+   
+
+# p0 <-
+#   plot_data %>%
+#   mutate(organ_type = ifelse(organ_name == organ_name2,
+#                              "same organ", 
+#                              "diff organ")) %>% 
+#   ggplot(aes(cor)) +
+#   geom_histogram(bins = 50) +
+#   scale_x_continuous(limits = c(0.6, 1)) +
+#   facet_wrap(~ organ_type, ncol = 1, scales = "free_y", 
+#              strip.position = "right") +
+#   theme_minimal() +
+#   theme(axis.text.x = element_blank(),
+#         axis.title.x = element_blank())
+
+p1 <-
+  plot_data %>%
+  mutate(organ_type = case_when(tissue1 == tissue2 ~ "same tissue",
+                                organ_name == organ_name2 ~ "same organ",
+                                organ_name != organ_name2 ~ "diff organ")) %>%
+  ggplot(aes(cor)) +
+  geom_histogram(bins = 100) +
+  scale_x_continuous(limits = c(0.6, 1),
+                     expand = expansion(0)) +
+  scale_y_continuous(expand = expansion(c(0, 0.05))) +
+  facet_wrap(~ organ_type, ncol = 1, scales = "free_y",
+             strip.position = "right") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        strip.text.y = element_text(angle = 0, hjust = 0),
+        panel.background = element_rect(fill = "gray90"),
+        panel.grid = element_blank(),
+        panel.border = element_blank())
+        # axis.line = element_line())
+
+p1
+p2 <- 
+  plot_data %>% 
+  
+  group_by(sample1) %>% 
+  mutate(cor_perc = rank(cor)/length(cor)) %>% 
+  ungroup() %>% 
+  filter(type == "same tissue") %>% 
+  group_by(tissue_name) %>% 
+  mutate(min = min(cor),
+         mean = mean(cor),
+         max = max(cor)) %>% 
+  ungroup() %>% 
+  arrange(min) %>% 
+  mutate(tissue_name = factor(tissue_name, unique(tissue_name))) %>% 
+  ggplot(aes(cor, tissue_name)) +
+  geom_boxplot(lwd=0.5) +
+  # geom_vline(xintercept = 1) +
+  theme_bw() +
+  scale_x_continuous(limits = c(0.6, 1),
+                     expand = expansion(0)) +
+  labs(x = "Spearman's rho") +
+  theme(axis.title.y = element_blank())
+
+p1 / p2 +
+  plot_layout(heights = c(0.2, 1))
+ggsave(savepath("Sample correlation dist.pdf"),
+       width = 5, height = 11)
+
+
+plot_data %>% 
+  filter(type == "same tissue") %>% 
+  arrange(cor) %>% 
+  group_by(tissue_name) %>% 
+  summarise(mean_cor = mean(cor)) %>% 
+  arrange(mean_cor) %T>% 
+  print() %>% 
+  pull(mean_cor) %T>%
+  {range(.) %>% print()} %>% 
+  mean()
+  
+
+# plot_data %>% 
+#   left_join(tissue_mapping %>% 
+#               select(tissue, tissue_name),
+#             by = c("tissue1" = "tissue")) %>%
+#   group_by(sample1) %>% 
+#   mutate(cor_perc = rank(cor)/length(cor)) %>% 
+#   filter(sample1 == "peri_b") %>% 
+#   View
+
+
+plot_data %>% 
+  left_join(tissue_mapping %>% 
+              select(tissue, tissue_name),
+            by = c("tissue1" = "tissue")) %>%
+  group_by(sample1) %>% 
+  mutate(cor_perc = rank(cor)/length(cor)) %>% 
+  filter(type == "same tissue") %>% 
+  arrange(cor_perc)
+
+plot_data %>% 
+  filter(tissue1 == "peri",
+         type == "same tissue") %>% 
+  select(ind1, ind2, cor) %>% 
+  spread(ind2, cor) %>% 
+  column_to_rownames("ind1") %>% 
+  pheatmap
+
+plot_data %>% 
+  # filter(tissue1 == "peri") %>% View
+  filter(sample1 == "peri_b") %>% 
+  # View
+  ggplot(aes(cor)) +
+  geom_histogram() +
+  geom_vline(data = . %>% 
+               filter(type == "same tissue"),
+             aes(xintercept = cor))
+#########################################
+
+
+# 
+# plot_data_dist <- 
+#   sample_pca$scores[, 1:10] %>% 
+#   dist() %>% 
+#   as.matrix() %>% 
+#   as_tibble(rownames = "sample1") %>% 
+#   gather(sample2, dist, -1) %>% 
+#   separate(sample1, into = c("tissue1", "ind1"), sep = "_", remove = F) %>% 
+#   separate(sample2, into = c("tissue2", "ind2"), sep = "_", remove = F) %>% 
+#   mutate(type = ifelse(tissue1 == tissue2,
+#                        "same tissue", 
+#                        "diff tissue")) %>% 
+#   filter(sample1 != sample2)
+#   
+# 
+# 
+# p1 <- 
+#   plot_data_dist %>% 
+#   filter(type == "diff tissue") %>% 
+#   ggplot(aes(dist)) +
+#   geom_histogram(bins = 50) + 
+#   # scale_x_continuous(limits = c(0.6, 1)) +
+#   theme_minimal() +
+#   theme(axis.text.x = element_blank(),
+#         axis.title.x = element_blank())
+# p1
+# p2 <- 
+#   plot_data_dist %>% 
+#   left_join(tissue_mapping %>% 
+#               select(tissue, tissue_name),
+#             by = c("tissue1" = "tissue")) %>%
+#   filter(type == "same tissue") %>% 
+#   group_by(tissue_name) %>% 
+#   mutate(min = min(dist),
+#          median = median(dist),
+#          max = max(dist)) %>% 
+#   ungroup() %>% 
+#   arrange(median) %>% 
+#   mutate(tissue_name = factor(tissue_name, unique(tissue_name))) %>% 
+#   ggplot(aes(dist, tissue_name)) +
+#   geom_boxplot(fill = "gray") +
+#   theme_minimal() +
+#   # scale_x_continuous(limits = c(0.6, 1)) +
+#   labs(x = "Spearman's rho") +
+#   theme(axis.title.y = element_blank())
+# 
+# p1 / p2 +
+#   plot_layout(heights = c(0.2, 1))
+
+```
+
+## Expression rank score
+
+```{r}
+
+exp_rank_data <- 
+  pig_atlas_tissue %>% 
+  select(enssscg_id, tissue_name, nx) %>% 
+  # filter(enssscg_id %in% sample(enssscg_id, 100)) %>%
+  group_by(enssscg_id) %>% 
+  filter(max(nx) > 0) %>% 
+  mutate(nx = nx / max(nx),
+         nx_rank = rank(nx, ties.method = "random")) %>% 
+  ungroup() %>% 
+  select(-tissue_name)
+  
+exp_rank_clust <-
+  exp_rank_data %>% 
+  spread(nx_rank, nx) %>% 
+  # head(5000) %>% 
+  column_to_rownames("enssscg_id") %>% 
+  dist() %>% 
+  hclust(method = "ward.D2")
+
+exp_rank_clusters <- 
+  cutree(exp_rank_clust, 10) %>% 
+  enframe("enssscg_id", "spec_cluster")
+
+
+exp_rank_score <- 
+  exp_rank_data %>% 
+  group_by(enssscg_id) %>% 
+  summarise(score = sum(nx) / max(nx_rank),
+            tau = sum(1 - nx) / (max(nx_rank) - 1))
+
+
+
+example_gene <- 
+  sample(exp_rank_data$enssscg_id, 1) 
+
+exp_rank_data %>% 
+  filter(enssscg_id == example_gene) %>% 
+  mutate(nx_rank = nx_rank / max(nx_rank)) %>% 
+  ggplot(aes(nx_rank, nx)) +
+  geom_point() +
+  geom_line() +
+  geom_area(alpha = 0.5, 
+            fill = "orangered") +
+  theme_bw() +
+  ggtitle(exp_rank_score %>% 
+            filter(enssscg_id == example_gene) %>% 
+            with(paste(enssscg_id, 
+                       "\narea score =", round(score, 3), 
+                       "\ntau score =", round(tau, 3))))
+ggsave(savepath("Tau example single.pdf"),
+       width = 5, height = 4)
+exp_rank_score %>% 
+  arrange(score) %>% 
+  left_join(gene_mapping %>% 
+              select(1, 2)) %>% 
+  filter(display_name != "NULL") %>% 
+  left_join(pig_gene_classification %>% 
+              select(1, 2, enhanced_tissues)) %>% 
+  mutate(tau_class = case_when(tau > 0.9 ~ "high", 
+                               tau > 0.65 ~ "medium", 
+                               tau > 0.4 ~ "low",
+                               T ~ "very low")) %>% 
+  group_by(tau_class) %>% 
+  slice(sample(1:length(tau), 3)) %>% 
+  ungroup() %>% 
+  inner_join(exp_rank_data) %>% 
+  mutate(nx_rank = nx_rank / max(nx_rank),
+         tau_class = factor(tau_class, 
+                            c("high", 
+                              "medium",
+                              "low",
+                              "very low"))) %>% 
+  
+  ggplot(aes(nx_rank, nx)) +
+  geom_point() +
+  geom_line() +
+  geom_area(alpha = 0.5, 
+            fill = "orangered") +
+  theme_bw() +
+  facet_wrap(~ tau_class + 
+               display_name + 
+               specificity_category +
+               enhanced_tissues, ncol = 6) 
+ggsave(savepath("Tau examples.pdf"),
+       width = 10, height = 6)
+exp_rank_score %>% 
+  ggplot(aes(score, tau)) +
+  geom_hex(bins = 1000) +
+  geom_abline(slope = -1, intercept = 1)
+
+plot_order <- 
+  exp_rank_score %>% 
+  inner_join(exp_rank_clusters) %>% 
+  group_by(spec_cluster) %>% 
+  summarise(score = mean(score)) %>% 
+  arrange(score) %>% 
+  pull(spec_cluster)
+  
+p0 <- 
+  exp_rank_score %>% 
+  inner_join(exp_rank_clusters) %>% 
+  mutate(spec_cluster = factor(spec_cluster, plot_order)) %>% 
+  ggplot(aes(spec_cluster, score)) +
+  geom_violin() +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  facet_wrap(~ spec_cluster, nrow = 1, scales = "free_x") 
+
+p1 <-
+  pig_gene_classification %>% 
+  inner_join(exp_rank_clusters) %>%
+  select(enssscg_id, specificity_category, enhanced_tissues, spec_cluster) %>% 
+    gather(type, value, enhanced_tissues, specificity_category) %>% 
+    mutate(value = ifelse(is.na(value), 
+                          "not enriched", 
+                          value)) %>% 
+    separate_rows(value, sep = ";") %>% 
+  group_by(type, spec_cluster, value) %>% 
+  count() %>% 
+  ungroup() %>% 
+  mutate(spec_cluster = factor(spec_cluster, plot_order))  %>% 
+    left_join(tissue_mapping %>% 
+                select(consensus_tissue_name, organ_name) %>% 
+                distinct(), 
+              c("value" = "consensus_tissue_name")) %>% 
+    mutate(value = ifelse(is.na(organ_name), 
+                          value, 
+                          organ_name)) %>% 
+  ggplot(aes(type, n, fill = value)) +
+  geom_col(show.legend = F) +
+  scale_fill_manual(values = c(gene_category_pal, tissue_colors_palette_organs)) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  facet_wrap(~ spec_cluster, nrow = 1, scales = "free_x") 
+
+p2 <- 
+  exp_rank_data %>% 
+  inner_join(exp_rank_clusters) %>% 
+  mutate(spec_cluster = factor(spec_cluster, plot_order)) %>% 
+  # filter(ensssg_id %in% sample(enssscg_id, 100)) %>% 
+  ggplot(aes(nx_rank, nx))+
+  # geom_line(alpha = 0.1) +
+  geom_hex(aes(fill = stat(log10(count))),
+           bins = 100) +
+  # geom_smooth() +
+  facet_wrap(~ spec_cluster, nrow = 1) +
+  theme_bw() 
+  
+p0 / p1 / p2  
+ggsave(savepath("Tau cluster summary.pdf"),
+       width = 12, height = 6)
+
+exp_rank_data %>% 
+  inner_join(exp_rank_clusters) %>% 
+  mutate(spec_cluster = factor(spec_cluster, plot_order)) %>% 
+  # filter(ensssg_id %in% sample(enssscg_id, 100)) %>% 
+  ggplot(aes(nx_rank, nx))+
+  # geom_line(alpha = 0.1) +
+  geom_hex(aes(fill = stat(log10(count))),
+           bins = 50) +
+  # geom_smooth() +
+  scale_fill_viridis() +
+  facet_wrap(~ spec_cluster) +
+  theme_bw() 
+
+############################
+
+library(multidplyr)
+worker_cluster <- new_cluster(n = 5)
+cluster_library(worker_cluster, c("dplyr",
+                                  "tidyverse"))
+cluster_copy(worker_cluster, c("lm"))
+
+exp_polys <-
+  exp_rank_data %>%
+  expand_grid(poly_degree = 15) %>% 
+  group_by(poly_degree, enssscg_id) %>% 
+  partition(worker_cluster) %>% 
+  do({
+    g_data <<- .
+    poly_fit <- lm(nx ~ poly(nx_rank, unique(g_data$poly_degree)),
+                   data = g_data)
+    
+    poly_fit_sum <- 
+      summary(poly_fit)
+    
+    tibble(lm = list(poly_fit)) %>% 
+      mutate(r2 = poly_fit_sum$r.squared,
+             r2_adj = poly_fit_sum$adj.r.squared)
+  }) %>% 
+  ungroup() %>% 
+  collect() 
+
+
+
+
+exp_polys_coef <- 
+  exp_polys %>% 
+  group_by(enssscg_id, poly_degree, r2_adj) %>% 
+  partition(worker_cluster) %>% 
+  do({
+    coefficients(.$lm[[1]]) %>% 
+      enframe("coefficient", "value") 
+
+  }) %>% 
+  ungroup() %>% 
+  collect() %>% 
+  mutate(coefficient = paste0("c", str_extract(coefficient, "I|\\d$"))) 
+
+exp_polys %>% 
+  select(poly_degree, enssscg_id, r2, r2_adj) %>% 
+  mutate(poly_degree = factor(poly_degree)) %>% 
+  ggplot(aes(r2_adj, poly_degree)) +
+  geom_violin(fill = "orangered") +
+  theme_bw()
+
+# sim_poly_data <-
+#   exp_polys %>% 
+#   # filter(poly_degree == 3) %>% 
+#   # filter(r2_adj > 0.99) %>% 
+#   group_by(poly_degree, enssscg_id) %>% 
+#   partition(worker_cluster) %>% 
+#   do({
+#     g_data <<- .
+#     
+#     tibble(x = seq(0, 1, length.out = 50),
+#            y = predict(g_data$lm[[1]], newdata = tibble(nx_rank = x)))
+#   }) %>% 
+#   ungroup() %>% 
+#   collect() %>% 
+#   inner_join(exp_rank_clusters) 
+rm(worker_cluster)
+#   
+# sim_poly_data %>% 
+#   ggplot(aes(x, y, group = enssscg_id)) +
+#   geom_line(alpha =0.3) +
+#   theme_bw()
+
+
+
+# predicted_df <- 
+#   exp_polys %>% 
+#   filter(enssscg_id == plot_gene) %>%
+#   filter(poly_degree == 3) %>% 
+#   pull(lm) %>% 
+#   {.[[1]]} %>% 
+#   {data.frame(y = predict(., 
+#                          newdata = tibble(nx_rank = seq(0, 1,
+#                                                         length.out = 50))))}
+# 
+#  predict(a, newdata = tibble(nx_rank = 1:10))
+#   predict(newdata = tibble(nx_rank = x))
+plot_gene <- sample(exp_polys$enssscg_id, 1)
+
+exp_rank_data %>% 
+  filter(enssscg_id == plot_gene) %>% 
+  ggplot(aes(nx_rank, nx)) +
+  geom_point() +
+  stat_function(fun = function(x) {exp_polys %>% 
+      filter(enssscg_id == plot_gene) %>%
+      filter(poly_degree == 15) %>% 
+      pull(lm) %>% 
+      {.[[1]]} %>% 
+      predict(newdata = tibble(nx_rank = x))})
+
+
+# exp_polys_coef_clust <- 
+  exp_polys_coef %>% 
+  filter(poly_degree == 10) %>% 
+  select(enssscg_id, coefficient, value) %>% 
+  spread(coefficient, value) %>% 
+  column_to_rownames("enssscg_id") %>% 
+    pheatmap(clustering_method = "ward.D2", 
+             cluster_cols = F, 
+             show_rownames = F,
+             annotation_row = exp_rank_clusters %>%
+               mutate(spec_cluster = as.character(spec_cluster)) %>% 
+               left_join(exp_polys %>% 
+                           select(enssscg_id, r2_adj)) %>% 
+               column_to_rownames("enssscg_id"))
+# exp_rank_data %>% 
+#       inner_join(exp_rank_clusters) %>% 
+#       filter(spec_cluster == 13) %>% 
+#   ggplot(aes(nx_rank, nx)) +
+#   geom_hex() +
+#   stat_function(fun=function(x) predict(gene_poly, newdata = tibble(nx_rank = x)))
+
+exp_rank_data %>%
+  inner_join(exp_rank_clusters) %>%
+  mutate(spec_cluster = factor(spec_cluster, plot_order)) %>% 
+  group_by(spec_cluster) %>% 
+  filter(enssscg_id %in% sample(unique(enssscg_id), 1)) %>%  
+  ungroup() %>% 
+  arrange(spec_cluster) %>% 
+  mutate(enssscg_id = factor(enssscg_id, unique(enssscg_id))) %>% 
+  ggplot(aes(nx_rank, nx, group = enssscg_id)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_line(alpha = 0.5) +
+  facet_wrap(~spec_cluster) +
+  theme_bw() +
+  labs(y = "Relativt uttryckt till max-uttryck",
+       x = "Rank")
+
+  
+exp_rank_data %>% 
+  inner_join(exp_rank_clusters) %>% 
+  mutate(spec_cluster = factor(spec_cluster, plot_order)) %>%
+  arrange(spec_cluster, enssscg_id, nx_rank) %>% 
+  group_by(enssscg_id) %>% 
+  mutate(nx = nx / sum(nx),
+         nx = cumsum(nx)) %>% 
+  # filter(ensssg_id %in% sample(enssscg_id, 100)) %>% 
+  ggplot(aes(nx_rank, nx))+
+  # geom_line(alpha = 0.1) +
+  geom_hex(aes(fill = stat(log10(count))),
+           bins = 100) +
+  # geom_smooth() +
+  scale_fill_viridis() +
+  facet_wrap(~ spec_cluster) +
+  theme_bw() 
+
+exp_rank_data %>% 
+  inner_join(exp_rank_clusters) %>% 
+  mutate(spec_cluster = factor(spec_cluster, plot_order),
+         enssscg_id = factor(enssscg_id,
+                             with(exp_rank_clust, labels[order]))) %>% 
+  ggplot(aes(enssscg_id, nx_rank, fill = nx)) +
+  ggrastr::geom_tile_rast() +
+  facet_wrap(~spec_cluster, nrow = 1, scales = "free_x") +
+  scale_fill_viridis() +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+exp_rank_score %>% 
+  ggplot(aes(score)) +
+  geom_density()
+
+exp_rank_score %>% 
+  left_join(pig_gene_classification) %>% 
+  arrange(score) %>% 
+  group_by(specificity_category) %>% 
+  mutate(cum_n = row_number()) %>% 
+  ungroup() %>% 
+  ggplot(aes(score, cum_n, color = specificity_category)) +
+  geom_line(size = 3) + 
+  scale_color_manual(values = gene_category_pal) +
+  theme_bw()
+
+exp_rank_score %>% 
+  arrange(score) %>% 
+  left_join(pig_gene_classification) 
+
+exp_rank_score %>% 
+  left_join(pig_gene_classification) %>% 
+  arrange(score) %>% 
+  mutate(specificity_category = factor(specificity_category, spec_category_levels)) %>% 
+  ggplot(aes(score, specificity_category, fill = specificity_category)) +
+  geom_violin(show.legend = F, scale = "width", draw_quantiles = 0.5) +
+  scale_fill_manual(values = gene_category_pal) +
+  theme_bw()
+ggsave(savepath("Tau distribution.pdf"),
+       width = 5, height = 4)
+
+
+############
+
+calculate_tau_score <- 
+  function(wide_data) {
+    max_exp <- 
+      apply(wide_data,
+            MARGIN = 1,
+            max)
+    
+    N <- 
+      apply(wide_data,
+            MARGIN = 1,
+            function(x) length(which(!is.na(x))))
+    
+    expression_sum <- 
+      wide_data %>% 
+      sweep(MARGIN = 1, 
+            STATS = max_exp, 
+            FUN = `/`) %>% 
+      {1 - .} %>% 
+      apply(MARGIN = 1,
+            sum)
+      
+    
+    tau_score <- 
+      (expression_sum / (N - 1)) %>% 
+      enframe("gene", "tau_score")
+    
+    tau_score
+  }
+
+wide_data <- 
+  pig_atlas_tissue %>% 
+  select(enssscg_id, tissue_name, nx) %>% 
+  spread(tissue_name, nx) %>% 
+  column_to_rownames("enssscg_id")
+
+tau_score <- 
+  calculate_tau_score(wide_data)
+
+
+exp_rank_score %>% 
+  left_join(tau_score,
+            by = c("enssscg_id" = "gene")) %>% 
+  filter(tau != tau_score)
 
 ```
 

@@ -1978,7 +1978,7 @@ pca_R2_plot <- function(pca_stats, mark_pc) {
 
 plot_dendrogram <- 
   function(clust, 
-           color_mapping, label_col, color_col, pal, do_label = F) {
+           pal, do_label = F) {
     
     dendr <- dendro_data(clust)
     
